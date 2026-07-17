@@ -1,0 +1,210 @@
+"use client";
+
+import { useCallback, type ComponentProps, type ReactNode } from "react";
+import { DragDropProvider } from "@dnd-kit/react";
+import { constrainClipDrag } from "@waveform-playlist/engine";
+import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
+import {
+  ClipInteractionProvider,
+  usePlaylistData,
+  usePlaylistControls,
+  useClipDragHandlers,
+  useDragSensors,
+  noDropAnimationPlugins,
+} from "@waveform-playlist/browser";
+import { TRACK_ROW_HEIGHT_PX } from "./trackLayout";
+
+interface ClipSourceData {
+  trackIndex: number;
+  clipIndex: number;
+  clipId: string;
+  boundary?: "left" | "right";
+}
+
+interface ClipDragLayerProps {
+  children: ReactNode;
+}
+
+// Derived from DragDropProvider's own prop types rather than dnd-kit's
+// generic DragStartEvent/DragEndEvent aliases directly — those carry default
+// type params that don't resolve cleanly through Parameters<> here.
+type DragDropProviderProps = ComponentProps<typeof DragDropProvider>;
+type OnDragStart = NonNullable<DragDropProviderProps["onDragStart"]>;
+type OnDragEnd = NonNullable<DragDropProviderProps["onDragEnd"]>;
+type DragStartEventArg = Parameters<OnDragStart>[0];
+type DragEndEventArg = Parameters<OnDragEnd>[0];
+
+// useClipDragHandlers' own return type has the same unresolved-generic issue
+// internally (its handlers type to `(event: never) => void`), so calling
+// them with our concretely-typed event needs a narrow escape hatch here —
+// this is a type-only mismatch in the library's .d.ts, not a runtime one.
+type LibraryDragHandler = (event: never) => void;
+
+/**
+ * Finds where `clip` actually lands if dropped at `proposedStartSample`
+ * among `otherClips` (the target track's clips, excluding this one), and
+ * clamps only enough to avoid overlapping whichever clip ends up adjacent to
+ * that *proposed* position.
+ *
+ * This is deliberately not engine.moveClip()'s approach: that constrains
+ * movement relative to the clip's neighbors *at drag-start*, computed once
+ * and held fixed — so a clip can only slide within its current gap and can
+ * never cross a neighbor to reorder past it. Anchoring the neighbor lookup
+ * to the proposed drop position instead (via constrainClipDrag with a zero
+ * delta, reusing the engine's own overlap math) allows a clip to be dropped
+ * before an earlier clip, same as dragging it to any other open slot.
+ */
+function resolveDropPosition(
+  clip: AudioClip,
+  proposedStartSample: number,
+  otherClips: AudioClip[]
+): number {
+  const proposedClip = { ...clip, startSample: Math.max(0, proposedStartSample) };
+  const merged = [...otherClips, proposedClip].sort(
+    (a, b) => a.startSample - b.startSample
+  );
+  const mergedIndex = merged.findIndex((c) => c.id === clip.id);
+  const constrainedDelta = constrainClipDrag(proposedClip, 0, merged, mergedIndex);
+  return Math.max(0, Math.floor(proposedClip.startSample + constrainedDelta));
+}
+
+/**
+ * Enables clip dragging with cross-track support and free reordering within
+ * a track.
+ *
+ * The library's own ClipInteractionProvider is a turnkey drag layer, but it
+ * unconditionally applies a horizontal-axis restriction, and its onDragEnd
+ * delegates to engine.moveClip() — which, as above, only lets a clip slide
+ * within its current gap and has no cross-track primitive at all. Whether a
+ * clip renders as draggable is gated by an internal context flag that only
+ * ClipInteractionProvider can set (it isn't exported), so we keep it mounted
+ * for that side effect and nest our own DragDropProvider inside it.
+ * Draggables always bind to the nearest DragDropProvider ancestor, so ours
+ * takes over the actual interaction — ClipInteractionProvider's own outer
+ * one ends up with nothing registered.
+ *
+ * Every clip *move* (same-track reorder or cross-track) goes through
+ * resolveDropPosition and is applied by reassigning the tracks array
+ * directly via onTracksChange — the same "external update" path used
+ * everywhere else in this app (import, remove, add track). Boundary trims
+ * and cancelled drags are untouched and still delegate to the library.
+ */
+export function ClipDragLayer({ children }: ClipDragLayerProps) {
+  return (
+    <ClipInteractionProvider>
+      <CrossTrackDragProvider>{children}</CrossTrackDragProvider>
+    </ClipInteractionProvider>
+  );
+}
+
+function CrossTrackDragProvider({ children }: ClipDragLayerProps) {
+  const { tracks, samplesPerPixel, playoutRef, isDraggingRef, onTracksChange } =
+    usePlaylistData();
+  const { setSelectedTrackId } = usePlaylistControls();
+  const sensors = useDragSensors();
+
+  const {
+    onDragStart: libraryOnDragStart,
+    onDragMove,
+    onDragEnd: libraryOnDragEnd,
+  } = useClipDragHandlers({
+    tracks,
+    onTracksChange: onTracksChange ?? (() => {}),
+    samplesPerPixel,
+    engineRef: playoutRef,
+    isDraggingRef,
+  });
+
+  const onDragStart = useCallback(
+    (event: DragStartEventArg) => {
+      const data = event.operation?.source?.data as ClipSourceData | undefined;
+      if (data && tracks[data.trackIndex]) {
+        setSelectedTrackId(tracks[data.trackIndex].id);
+      }
+      (libraryOnDragStart as LibraryDragHandler)(event as never);
+    },
+    [libraryOnDragStart, tracks, setSelectedTrackId]
+  );
+
+  const onDragEnd = useCallback(
+    (event: DragEndEventArg) => {
+      const data = event.operation?.source?.data as ClipSourceData | undefined;
+
+      // Trims and cancelled drags are entirely the library's concern.
+      if (event.canceled || !data || data.boundary) {
+        (libraryOnDragEnd as LibraryDragHandler)(event as never);
+        return;
+      }
+
+      const sourceTrackIndex = data.trackIndex;
+      // `position` is the raw pointer delta, unaffected by any modifier —
+      // unlike `transform`, which a horizontal-only modifier would zero on Y.
+      const rawDeltaY =
+        event.operation.position.current.y - event.operation.position.initial.y;
+      const deltaRows = Math.round(rawDeltaY / TRACK_ROW_HEIGHT_PX);
+      const targetTrackIndex = Math.min(
+        Math.max(sourceTrackIndex + deltaRows, 0),
+        tracks.length - 1
+      );
+
+      const sourceTrack = tracks[sourceTrackIndex];
+      const targetTrack = tracks[targetTrackIndex];
+      const clip = sourceTrack?.clips[data.clipIndex];
+      if (!clip || !targetTrack) {
+        playoutRef.current?.abortTransaction();
+        isDraggingRef.current = false;
+        return;
+      }
+
+      const sampleDelta = event.operation.transform.x * samplesPerPixel;
+      const proposedStartSample = clip.startSample + sampleDelta;
+      const otherClips = targetTrack.clips.filter((c) => c.id !== clip.id);
+      const newStartSample = resolveDropPosition(
+        clip,
+        proposedStartSample,
+        otherClips
+      );
+
+      const newTracks: ClipTrack[] = tracks.map((track, index) => {
+        if (index === sourceTrackIndex && index === targetTrackIndex) {
+          return {
+            ...track,
+            clips: [
+              ...otherClips,
+              { ...clip, startSample: newStartSample },
+            ],
+          };
+        }
+        if (index === sourceTrackIndex) {
+          return { ...track, clips: track.clips.filter((c) => c.id !== clip.id) };
+        }
+        if (index === targetTrackIndex) {
+          return {
+            ...track,
+            clips: [...track.clips, { ...clip, startSample: newStartSample }],
+          };
+        }
+        return track;
+      });
+
+      // No engine.moveClip()/trimClip() call was made on this transaction —
+      // discard it rather than leave it open for the next operation.
+      playoutRef.current?.abortTransaction();
+      isDraggingRef.current = false;
+      onTracksChange?.(newTracks);
+    },
+    [tracks, onTracksChange, samplesPerPixel, playoutRef, isDraggingRef, libraryOnDragEnd]
+  );
+
+  return (
+    <DragDropProvider
+      sensors={sensors}
+      onDragStart={onDragStart}
+      onDragMove={onDragMove as unknown as DragDropProviderProps["onDragMove"]}
+      onDragEnd={onDragEnd}
+      plugins={noDropAnimationPlugins}
+    >
+      {children}
+    </DragDropProvider>
+  );
+}
