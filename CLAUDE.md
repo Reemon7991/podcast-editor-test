@@ -145,6 +145,45 @@ exported and reused directly for collision-safety — same math
 `engine.moveClip()` uses internally, just applied to a track/position the
 clip isn't natively being moved through the engine for.
 
+### Cross-track clip moves force a full engine rebuild — and `play()` can race it
+
+`ClipDragLayer.tsx`'s cross-track move applies the result via `onTracksChange`
+directly (see "Clip dragging" above — there's no `engine.moveClip()` cross-
+track primitive). Inside `WaveformPlaylistProvider`, the tracks array this
+produces always fails the `tracks === engineTracksRef.current` identity
+check, so the provider can't treat it as an engine-originated update; it
+falls through to the **full rebuild** branch — dispose the whole Tone.js
+engine/adapter and reconstruct it for every track and clip, not just the
+moved one. For a large playlist (confirmed with 7 tracks / ~65 min of real
+audio) this rebuild is slow enough to click through.
+
+While it's in flight, nothing in the library stops you from pressing Play:
+`PlayButton` only disables on `isPlaying`, never on rebuild-in-progress, and
+the provider's own `play()` (in `useClipDragHandlers`'s sibling code, not
+that hook itself) has a check-then-act race —
+`if (!audioInitializedRef.current) { await engineRef.current.init(); }
+engineRef.current.play(...)`. If the rebuild's `engineRef.current = newEngine`
+swap lands during that `await`, `init()` resolved against the *old* engine
+but `play()` fires on the *new* one, whose underlying `TonePlayout` was never
+initialized. Result: an uncaught
+`Error: [waveform-playlist] TonePlayout not initialized. Call init() first.`
+thrown from `TonePlayout.ts:197`. Reproduced by: several trims (fine, no
+rebuild — trims commit via `engine.trimClip()` on the same engine instance),
+one cross-track move, then pressing Play before the rebuild's `isReady` flip
+completed.
+
+Not fixable from application code (the race is inside the library's
+provider), but the *trigger window* is closable: `EditorShell.tsx` now wraps
+`<TransportControls>` in a `pointer-events-none` + `opacity-50` guard while
+`!isReady`, the same readiness flag that already hides `<Waveform>` during a
+rebuild. This blocks Play (and every other transport button) for the
+duration of any full engine rebuild, not just this one — cheap, and correct
+regardless of what triggers the rebuild. Residual gap, accepted as low-risk:
+if a user starts a *new* drag while an already-in-flight `play()` call is
+mid-`await` on `init()`, the race could theoretically still occur — the drag
+layer itself isn't `isReady`-gated. Revisit only if this actually reproduces
+in practice.
+
 ## Verification approach (no permanent test suite)
 
 There is no Playwright/Jest setup committed to this repo. All verification
