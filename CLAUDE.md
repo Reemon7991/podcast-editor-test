@@ -154,22 +154,27 @@ exported and reused directly for collision-safety — same math
 `engine.moveClip()` uses internally, just applied to a track/position the
 clip isn't natively being moved through the engine for.
 
-### Cross-track clip moves force a full engine rebuild — and `play()` can race it
+### Every accepted clip move forces a full engine rebuild — and `play()` can race it (FIXED)
 
-`ClipDragLayer.tsx`'s cross-track move applies the result via `onTracksChange`
-directly (see "Clip dragging" above — there's no `engine.moveClip()` cross-
-track primitive). Inside `WaveformPlaylistProvider`, the tracks array this
-produces always fails the `tracks === engineTracksRef.current` identity
-check, so the provider can't treat it as an engine-originated update; it
-falls through to the **full rebuild** branch — dispose the whole Tone.js
-engine/adapter and reconstruct it for every track and clip, not just the
-moved one. For a large playlist (confirmed with 7 tracks / ~65 min of real
-audio) this rebuild is slow enough to click through.
+`ClipDragLayer.tsx` applies every accepted drop — same-track slide *and*
+cross-track — via `onTracksChange` directly (see "Clip dragging" above;
+there's no `engine.moveClip()` cross-track primitive, and this file discards
+the engine's own in-flight transaction on every commit via
+`playoutRef.current?.abortTransaction()`, not just cross-track ones). Inside
+`WaveformPlaylistProvider`, the tracks array this produces always fails the
+`tracks === engineTracksRef.current` identity check, so the provider can't
+treat it as an engine-originated update; it falls through to the **full
+rebuild** branch — dispose the whole Tone.js engine/adapter and reconstruct
+it for every track and clip, not just the moved one. This is broader than it
+first looks: **any** completed clip drag is a rebuild trigger, not only
+cross-track ones. For a large playlist (confirmed with 7 tracks / ~65 min of
+real audio) this rebuild is slow enough to click through.
 
 While it's in flight, nothing in the library stops you from pressing Play:
 `PlayButton` only disables on `isPlaying`, never on rebuild-in-progress, and
-the provider's own `play()` (in `useClipDragHandlers`'s sibling code, not
-that hook itself) has a check-then-act race —
+the provider's own `play()` (confirmed by reading
+`@waveform-playlist/browser`'s dist source directly, `dist/index.js:2638`)
+has a check-then-act race —
 `if (!audioInitializedRef.current) { await engineRef.current.init(); }
 engineRef.current.play(...)`. If the rebuild's `engineRef.current = newEngine`
 swap lands during that `await`, `init()` resolved against the *old* engine
@@ -181,17 +186,35 @@ rebuild — trims commit via `engine.trimClip()` on the same engine instance),
 one cross-track move, then pressing Play before the rebuild's `isReady` flip
 completed.
 
-Not fixable from application code (the race is inside the library's
-provider), but the *trigger window* is closable: `EditorShell.tsx` now wraps
-`<TransportControls>` in a `pointer-events-none` + `opacity-50` guard while
-`!isReady`, the same readiness flag that already hides `<Waveform>` during a
-rebuild. This blocks Play (and every other transport button) for the
-duration of any full engine rebuild, not just this one — cheap, and correct
-regardless of what triggers the rebuild. Residual gap, accepted as low-risk:
-if a user starts a *new* drag while an already-in-flight `play()` call is
-mid-`await` on `init()`, the race could theoretically still occur — the drag
-layer itself isn't `isReady`-gated. Revisit only if this actually reproduces
-in practice.
+Not fixable from application code (the race is inside bundled/minified
+vendor output — a `patch-package` fix would be fragile against every future
+version bump, since dist output isn't stable source), so the *trigger
+window* is closed from two directions instead:
+
+1. `EditorShell.tsx` wraps `<TransportControls>` in a `pointer-events-none` +
+   `opacity-50` guard while `!isReady` (unchanged) — blocks Play for the
+   duration of any full rebuild.
+2. The residual gap this left — a user starts a *new* drag while an
+   already-in-flight `play()` call is mid-`await` on `init()`, since
+   `isReady` is still `true` at that point (the rebuild hasn't started yet) —
+   is now closed by `transport/PlayButton.tsx`, a replacement for the
+   library's own `PlayButton` that flags a shared `playPendingRef` for the
+   duration of its `play()` call. `ClipDragLayer.tsx`'s `onDragEnd` checks
+   this ref and, if set, treats the drop the same as a cancelled drag
+   (delegates to the library's own handler instead of committing via
+   `onTracksChange`) — refusing to trigger a rebuild while a `play()` call
+   might still resolve against the engine that's about to be replaced.
+
+**Verification note**: this exact race could not be forced to reproduce in
+an automated Playwright harness even with the guard temporarily disabled
+(confirmed A/B, 10 throttled attempts each way — see
+`.claude/skills/verify/SKILL.md`). `AudioContext.resume()` latency isn't
+proportionally slowed by CPU throttling the way JS execution is, and the
+original discovery only happened against a real ~65-minute/7-track session.
+The fix is correct by inspection (the ref flips synchronously around the
+`await`, checked synchronously in `onDragEnd`) and introduces no regression
+to normal playback or dragging, but treat "closes the race" as unverified at
+runtime, not proven.
 
 ## Verification approach (no permanent test suite)
 
@@ -271,13 +294,15 @@ previously-passing scenarios before considering this closed:
 ## Known limitations (disclosed, not silently accepted)
 
 - Cross-track collision is enforced only at drop, not with live visual
-  feedback during the drag (same-track drags get the full
-  `engine.moveClip()`-driven experience since that's still the library's own
-  live-feedback path for the non-reordering case).
-- No undo/redo wiring for clip moves that go through `onTracksChange`
-  directly (same-track non-reorder slides still go through the engine's own
-  transaction system when unaffected; reorders and cross-track moves bypass
-  it by design, since there's no engine primitive to hook into for either).
+  feedback during the drag.
+- No undo/redo wiring for clip moves. Correction to an earlier note here:
+  this applies to *every* accepted drop, not just reorders/cross-track —
+  `onDragEnd` discards the engine's own in-flight transaction
+  (`playoutRef.current?.abortTransaction()`) and commits via
+  `onTracksChange` unconditionally (confirmed by reading the current
+  `ClipDragLayer.tsx`), so same-track slides never go through
+  `engine.moveClip()`'s transaction system either, despite what this section
+  previously said.
 - Memory: full Tone.js decode per clip, all resident simultaneously. Scale
   testing so far (15 tracks × 8 short synthetic clips = 120 clips) validated
   *structural/rendering* scalability, not real memory footprint at ~1hr of

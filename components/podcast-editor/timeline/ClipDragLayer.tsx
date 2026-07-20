@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, type ComponentProps, type ReactNode } from "react";
+import { useCallback, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { DragDropProvider } from "@dnd-kit/react";
 import { constrainClipDrag } from "@waveform-playlist/engine";
 import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
@@ -23,6 +23,16 @@ interface ClipSourceData {
 
 interface ClipDragLayerProps {
   children: ReactNode;
+  /** True for the duration of an in-flight PlayButton `play()` call (see
+   *  transport/PlayButton.tsx). The library's own `play()` re-reads its
+   *  engine ref after an internal `await engine.init()` instead of using a
+   *  captured reference — if a drop lands mid-await and triggers an engine
+   *  rebuild, `play()` resumes against the new (uninitialized) engine and
+   *  throws "TonePlayout not initialized". Not patchable from here (the race
+   *  is inside vendored/bundled library code), so onDragEnd instead refuses
+   *  to commit a move while this flag is set, closing the trigger instead of
+   *  the symptom. */
+  playPendingRef: RefObject<boolean>;
 }
 
 // Derived from DragDropProvider's own prop types rather than dnd-kit's
@@ -89,15 +99,17 @@ function resolveDropPosition(
  * everywhere else in this app (import, remove, add track). Boundary trims
  * and cancelled drags are untouched and still delegate to the library.
  */
-export function ClipDragLayer({ children }: ClipDragLayerProps) {
+export function ClipDragLayer({ children, playPendingRef }: ClipDragLayerProps) {
   return (
     <ClipInteractionProvider>
-      <CrossTrackDragProvider>{children}</CrossTrackDragProvider>
+      <CrossTrackDragProvider playPendingRef={playPendingRef}>
+        {children}
+      </CrossTrackDragProvider>
     </ClipInteractionProvider>
   );
 }
 
-function CrossTrackDragProvider({ children }: ClipDragLayerProps) {
+function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps) {
   const { tracks, samplesPerPixel, playoutRef, isDraggingRef, onTracksChange } =
     usePlaylistData();
   const { setSelectedTrackId } = usePlaylistControls();
@@ -130,8 +142,10 @@ function CrossTrackDragProvider({ children }: ClipDragLayerProps) {
     (event: DragEndEventArg) => {
       const data = event.operation?.source?.data as ClipSourceData | undefined;
 
-      // Trims and cancelled drags are entirely the library's concern.
-      if (event.canceled || !data || data.boundary) {
+      // Trims and cancelled drags are entirely the library's concern. A move
+      // landing while a play() call is mid-await on engine.init() is treated
+      // the same way — see the playPendingRef doc comment on this component.
+      if (event.canceled || !data || data.boundary || playPendingRef.current) {
         (libraryOnDragEnd as LibraryDragHandler)(event as never);
         return;
       }
@@ -193,7 +207,15 @@ function CrossTrackDragProvider({ children }: ClipDragLayerProps) {
       isDraggingRef.current = false;
       onTracksChange?.(newTracks);
     },
-    [tracks, onTracksChange, samplesPerPixel, playoutRef, isDraggingRef, libraryOnDragEnd]
+    [
+      tracks,
+      onTracksChange,
+      samplesPerPixel,
+      playoutRef,
+      isDraggingRef,
+      playPendingRef,
+      libraryOnDragEnd,
+    ]
   );
 
   return (

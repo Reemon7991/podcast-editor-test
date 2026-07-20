@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import { Waveform, usePlaylistData } from "@waveform-playlist/browser";
 import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
@@ -14,6 +15,10 @@ interface EditorShellProps {
  */
 export function EditorShell({ onRemoveTrack }: EditorShellProps) {
   const { isReady } = usePlaylistData();
+  // Owned here (not inside PlayButton/ClipDragLayer) since both need it —
+  // see the doc comments on transport/PlayButton.tsx and
+  // timeline/ClipDragLayer.tsx for the play()/rebuild race this closes.
+  const playPendingRef = useRef(false);
 
   return (
     <div className="flex flex-col gap-3">
@@ -30,11 +35,11 @@ export function EditorShell({ onRemoveTrack }: EditorShellProps) {
         className={isReady ? undefined : "pointer-events-none opacity-50"}
         aria-disabled={!isReady}
       >
-        <TransportControls />
+        <TransportControls playPendingRef={playPendingRef} />
       </div>
       <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
         {isReady ? (
-          <ClipDragLayer>
+          <ClipDragLayer playPendingRef={playPendingRef}>
             <Waveform showClipHeaders onRemoveTrack={onRemoveTrack} />
           </ClipDragLayer>
         ) : (
