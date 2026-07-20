@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { TrackListBar } from "./TrackListBar";
-import { TimelineStage } from "./TimelineStage";
-import { useTimelineTracks } from "./useTimelineTracks";
+import { TrackListBar } from "./import/TrackListBar";
+import { TimelineStage } from "./timeline/TimelineStage";
+import { useTimelineTracks } from "./audio-engine/useTimelineTracks";
 
 export function PodcastEditor() {
   const { tracks, setTracks, addTrack, removeTrack, addFilesToTrack, isLoading } =

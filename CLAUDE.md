@@ -29,19 +29,28 @@ app/page.tsx                              server component, renders PodcastEdito
 components/podcast-editor/
   PodcastEditorLoader.tsx                 next/dynamic(ssr:false) wrapper — REQUIRED, see below
   PodcastEditor.tsx                       top-level state owner: useTimelineTracks + gap setting
-  useTimelineTracks.ts                    tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack
-  TrackListBar.tsx                        "Add track" + per-track "Add clip" file inputs
-  TimelineStage.tsx                       wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
-  trackLayout.ts                          TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
-  EditorShell.tsx                         TransportControls + ClipDragLayer(<Waveform showClipHeaders/>)
-  ClipDragLayer.tsx                       custom drag interaction layer — see "Clip dragging" below
-  TransportControls.tsx                   PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time
-  PlaybackTime.tsx                        live time display, registerFrameCallback-driven (NOT React state)
-  DurationLabel.tsx                       total duration display
+  audio-engine/
+    useTimelineTracks.ts                  tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack
+  timeline/
+    TimelineStage.tsx                     wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
+    EditorShell.tsx                       TransportControls + ClipDragLayer(<Waveform showClipHeaders/>)
+    ClipDragLayer.tsx                     custom drag interaction layer — see "Clip dragging" below
+    trackLayout.ts                        TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
+  transport/
+    TransportControls.tsx                 PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time
+    PlaybackTime.tsx                      live time display, registerFrameCallback-driven (NOT React state)
+    DurationLabel.tsx                     total duration display
+  import/
+    TrackListBar.tsx                      "Add track" + per-track "Add clip" file inputs
 ```
 
-Every file under `components/podcast-editor/` is `"use client"`. Nothing
-outside this folder needs to change to extend the feature set further.
+Feature folders group by concern, not by original evaluation order: `audio-engine/`
+owns track/clip state and decoding, `timeline/` owns the waveform stage and
+clip drag interaction, `transport/` owns playback controls/time display,
+`import/` owns file intake UI. Cross-folder imports are relative
+(`../transport/TransportControls`); same-folder imports stay `./`. Every file
+under `components/podcast-editor/` is `"use client"`. Nothing outside this
+folder needs to change to extend the feature set further.
 
 ## Critical setup gotchas (do not re-discover these)
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { Waveform, usePlaylistData } from "@waveform-playlist/browser";
-import { TransportControls } from "./TransportControls";
+import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
 
 interface EditorShellProps {
