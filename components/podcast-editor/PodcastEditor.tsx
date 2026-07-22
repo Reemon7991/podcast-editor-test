@@ -1,14 +1,12 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { TrackListBar } from "./import/TrackListBar";
+import { useCallback } from "react";
 import { TimelineStage } from "./timeline/TimelineStage";
 import { useTimelineTracks } from "./audio-engine/useTimelineTracks";
 
 export function PodcastEditor() {
   const { tracks, setTracks, addTrack, removeTrack, addFilesToTrack, isLoading } =
     useTimelineTracks();
-  const [gapSeconds, setGapSeconds] = useState(0);
 
   // WaveformPlaylistProvider's onRemoveTrack gives a track *index* (it's a
   // Waveform-level UI callback, not aware of our id-keyed state) — resolve it
@@ -23,21 +21,13 @@ export function PodcastEditor() {
 
   return (
     <div className="flex w-full flex-col gap-4">
-      <TrackListBar
-        tracks={tracks}
-        onAddTrack={addTrack}
-        onAddFilesToTrack={(trackId, files) =>
-          addFilesToTrack(trackId, files, gapSeconds)
-        }
-        gapSeconds={gapSeconds}
-        onGapSecondsChange={setGapSeconds}
-      />
-
       <TimelineStage
         tracks={tracks}
         onTracksChange={setTracks}
         onRemoveTrack={handleRemoveTrackByIndex}
         deferEngineRebuild={isLoading}
+        onAddTrack={addTrack}
+        onAddFilesToTrack={addFilesToTrack}
       />
     </div>
   );

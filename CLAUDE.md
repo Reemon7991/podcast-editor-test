@@ -20,12 +20,17 @@ as the fastest way to avoid re-deriving that work in a future session.
 
 1. Single-file playback (load one audio file, waveform, play/pause, seek,
    zoom, scroll, time display) — done, verified.
-2. Multi-clip single-track timeline (import multiple files, position
-   sequentially or with a gap, play as one continuous timeline) — done,
-   verified.
+2. Multi-clip single-track timeline (import multiple files via "Upload clip",
+   inserted back-to-back starting at the current playhead position into the
+   active track; play as one continuous timeline) — done; verified for the
+   original append-at-end/gap design, **not yet re-verified** for the current
+   insert-at-playhead behavior (see `useTimelineTracks.addFilesToTrack`) —
+   treat that specific insertion path as untested until it's exercised
+   end-to-end.
 3. Multi-track + clip dragging (multiple tracks, drag clips horizontally
-   within a track, drag clips vertically to another track) — implemented;
-   known issues tracked in "Open issue" below and in
+   within a track, drag clips vertically to another track, drop anywhere
+   including on top of another clip — overlap is intentional, see "Superseded
+   issue" below) — implemented; remaining known issues tracked in
    `timeline/EditorShell.tsx`'s own doc comment (the scroll-reset-on-rebuild
    history, including a real vendored-library bug found along the way that
    is diagnosed but **not actually patched** — no `patch-package` setup or
@@ -42,7 +47,7 @@ order they'd naturally unblock each other (persistence/undo before export
 makes sense to build on top of; split/fades and effects are independent of
 those two; the AI features are the most speculative and probably last).
 
-1. **Persistence** — project state (tracks/clips/gaps, decoded audio) survives
+1. **Persistence** — project state (tracks/clips, decoded audio) survives
    a reload. Nothing currently does; all state lives in React state only.
 2. **Undo/redo** — the library's own `WaveformPlaylistProvider` context
    already exposes `undo`/`redo`/`canUndo`/`canRedo` (confirmed in
@@ -70,29 +75,34 @@ those two; the AI features are the most speculative and probably last).
 app/page.tsx                              server component, renders PodcastEditorLoader
 components/podcast-editor/
   PodcastEditorLoader.tsx                 next/dynamic(ssr:false) wrapper — REQUIRED, see below
-  PodcastEditor.tsx                       top-level state owner: useTimelineTracks + gap setting
+  PodcastEditor.tsx                       top-level state owner: useTimelineTracks; threads addTrack/addFilesToTrack down to TimelineStage
   audio-engine/
-    useTimelineTracks.ts                  tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack
+    useTimelineTracks.ts                  tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack(trackId, files, insertionTimeSeconds)
   timeline/
     TimelineStage.tsx                     wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
-    EditorShell.tsx                       TransportControls + ClipDragLayer(<Waveform showClipHeaders/>)
+    EditorShell.tsx                       TransportControls + "New Track" button + ClipDragLayer(<Waveform showClipHeaders/>); also does manual track-click selection (see "Track selection" below)
     ClipDragLayer.tsx                     custom drag interaction layer — see "Clip dragging" below
     trackLayout.ts                        TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
   transport/
-    TransportControls.tsx                 PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time
+    TransportControls.tsx                 PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time + "Upload clip" file input (inserts into the active track at the current playhead position)
     PlaybackTime.tsx                      live time display, registerFrameCallback-driven (NOT React state)
     DurationLabel.tsx                     total duration display
-  import/
-    TrackListBar.tsx                      "Add track" + per-track "Add clip" file inputs
 ```
 
-Feature folders group by concern, not by original evaluation order: `audio-engine/`
-owns track/clip state and decoding, `timeline/` owns the waveform stage and
-clip drag interaction, `transport/` owns playback controls/time display,
-`import/` owns file intake UI. Cross-folder imports are relative
-(`../transport/TransportControls`); same-folder imports stay `./`. Every file
-under `components/podcast-editor/` is `"use client"`. Nothing outside this
-folder needs to change to extend the feature set further.
+There is no `import/` folder anymore — `TrackListBar.tsx` (the old top-of-page
+"Add track"/"Add clip" bar) was removed and its two responsibilities moved
+into the folders that already own that concern: adding a track lives in
+`timeline/EditorShell.tsx` (the "New Track" button, since it's laid out under
+the waveform's track-controls column), and adding clips lives in
+`transport/TransportControls.tsx` (the "Upload clip" button, since it needs
+the live playhead position from the same context transport controls already
+read). Feature folders otherwise still group by concern, not by original
+evaluation order: `audio-engine/` owns track/clip state and decoding,
+`timeline/` owns the waveform stage and clip drag interaction, `transport/`
+owns playback controls/time display and file intake. Cross-folder imports are
+relative (`../transport/TransportControls`); same-folder imports stay `./`.
+Every file under `components/podcast-editor/` is `"use client"`. Nothing
+outside this folder needs to change to extend the feature set further.
 
 ## Critical setup gotchas (do not re-discover these)
 
@@ -134,6 +144,48 @@ during playback. The real 60fps clock lives behind `registerFrameCallback`
 directly into the DOM via a ref inside that callback — this also means it
 never triggers a React re-render during playback, which is a bonus, not just
 a workaround.
+
+### Track selection (`selectedTrackId`) is split across three separate hooks
+
+`selectedTrackId` (the getter) lives on `PlaylistStateContextValue`, returned
+by **`usePlaylistState()`** — not `usePlaylistData()` and not
+`usePlaylistControls()`, despite how naturally either of those names reads for
+"give me the selected track." `setSelectedTrackId` (the setter) is a third,
+correct home: `PlaylistControlsContextValue`, via `usePlaylistControls()`.
+Confirmed directly against `@waveform-playlist/browser/dist/index.d.ts`. Got
+this wrong once already (`EditorShell.tsx` destructured `selectedTrackId` from
+`usePlaylistData()`, which doesn't have it — `tracks`/`isReady`/
+`timeScaleHeight` all do, which is presumably why it seemed like the right
+hook) — a `tsc --noEmit` on this repo will always catch it (`TS2339`) if it
+regresses, since there's no test suite to catch it otherwise.
+
+Related, separate bug from the same fix: `EditorShell.tsx` maintains a
+"sticky" ref (`activeTrackIdRef`) that always holds the last non-null
+`selectedTrackId`, read later by `TransportControls`' upload handler at
+file-dialog-close time (after the browser has already cleared focus/selection
+state). The ref update was originally written directly in the component body
+(`activeTrackIdRef.current = effectiveTrackId`) — React disallows mutating a
+ref's `.current` during render (it throws: "Cannot access refs during
+render"), so this must live inside a `useEffect` keyed on `effectiveTrackId`,
+not inline in the render body.
+
+**Correction to `EditorShell.tsx`'s own click-detection comment**: it claims
+"the library's built-in track controls never call `setSelectedTrackId` when
+the user clicks a track." That's only true for the left-hand controls column
+(mute/solo/track-name sidebar, `controlsWidth`) — confirmed by reading
+`@waveform-playlist/ui-components`'s `Playlist` component: `ControlsColumn` is
+a plain sibling with no click wiring at all. The **right-hand scrollable
+waveform/clips area** already has its own `ClickOverlay` wired to
+`onTracksMouseDown`, which resolves the clicked row via the same
+"cumulative track height" math (`peaksDataArray`/`waveHeight`/
+`showClipHeaders ? 22 : 0`) and calls `setSelectedTrackId` itself — confirmed
+in `@waveform-playlist/browser/dist/index.js`'s `handleMouseDown`/`selectTrack`.
+So `EditorShell.tsx`'s manual `handleWaveformPointerDown` is only load-bearing
+for clicks in the left controls column; for clicks in the waveform area it's
+running redundantly alongside the library's own (already-correct, assuming
+the two row-height computations agree) selection. Worth simplifying to only
+handle the controls-column case before trusting this long-term — not done as
+part of this pass since it works today.
 
 ### `useDynamicTracks` (from `@waveform-playlist/browser/tone`) has a real bug
 
@@ -192,9 +244,13 @@ control label, Mute button) across empty and populated tracks. Revisit this
 constant if `TRACK_WAVE_HEIGHT` or `showClipHeaders` usage changes.
 
 `constrainClipDrag` (from `@waveform-playlist/engine`) **is** publicly
-exported and reused directly for collision-safety — same math
-`engine.moveClip()` uses internally, just applied to a track/position the
-clip isn't natively being moved through the engine for.
+exported, and was originally reused directly here for collision-safety (same
+math `engine.moveClip()` uses internally, just applied to a track/position
+the clip isn't natively being moved through the engine for). It no longer is
+— `resolveDropPosition` dropped that call entirely once free clip overlap
+became the intended behavior; see "Superseded issue" further down. The rest
+of this section (cross-track target detection, `TRACK_ROW_HEIGHT_PX`) is
+still accurate and unaffected by that change.
 
 ### Every accepted clip move forces a full engine rebuild — and `play()` can race it (FIXED)
 
@@ -332,62 +388,37 @@ signal). If picking this project back up:
   (the clip's header bar) — not the waveform `<canvas>`, and not the
   `data-boundary-edge="left"|"right"` trim handles.
 
-## Open issue — clip reorder-past-a-neighbor drag (IN PROGRESS)
+## Superseded issue — clip reorder-past-a-neighbor drag (RESOLVED, by design change)
 
-**Symptom reported by user:** dragging a clip so it overlaps a neighbor that
-sits *before* it in time snaps back to its original position instead of
-reordering.
+This section used to track a bug where dragging a clip past an earlier
+neighbor would snap back instead of reordering, root-caused to
+`constrainClipDrag`'s collision math only allowing a reorder once the dragged
+clip's *entire* width cleared the neighbor. A swap-on-center-crossing fix
+(`resolveSameTrackMove`) was drafted but never implemented.
 
-**Root cause, confirmed by reading `constrainClipDrag` in
-`@waveform-playlist/engine`:** the earlier fix (`resolveDropPosition` in
-`ClipDragLayer.tsx`, still in the file as of this writing) determines a
-clip's new neighbors by inserting it into a freshly-sorted list at its
-*proposed* position and clamping via `constrainClipDrag`. This correctly
-allows reordering *only* once the dragged clip's proposed **start** position
-moves fully past the neighbor's own start (i.e. the sort order flips). For
-two clips of comparable size, that requires dragging clear across the
-*entire* neighbor's width, not just "onto" it — and if the neighbor sits at
-or near the timeline's own start (t=0, the common case for a first clip),
-there may be no numeric room for this to ever succeed, so it silently clamps
-back to "flush after the neighbor" — which looks identical to "did nothing."
-
-**Diagnosis, not yet applied to the file:** real drag-to-reorder UX (as in
-sortable lists) should trigger a swap once the dragged clip's **center**
-crosses the neighbor's **center** — not require clearing its entire span. A
-`resolveSameTrackMove(clip, sampleDelta, trackClips)` function was drafted
-(and reviewed with the user before being interrupted mid-write) that:
-
-1. Finds the clip's current immediate `prevClip`/`nextClip` via a sorted
-   lookup (same shape as the engine's own approach).
-2. If the proposed center has crossed `prevClip`'s center: **swap** — the
-   dragged clip takes `prevClip`'s old start, and `prevClip` moves to start
-   right after it (dragged clip's duration later).
-3. Same check mirrored for `nextClip` (dragging right past a neighbor).
-4. Otherwise: falls back to the existing clamped-slide behavior (unchanged).
-
-This only swaps with the *single* immediate neighbor being crossed — it does
-not cascade through multiple clips in one drag (an acceptable, explicitly
-scoped limitation; sequential drags cover multi-position moves). Cross-track
-drops keep using the existing `resolveCrossTrackDrop`/`constrainClipDrag`
-approach unchanged — there's no "current neighbor" to swap with when
-inserting onto a track the clip wasn't already on.
-
-**Next step:** implement `resolveSameTrackMove` in `ClipDragLayer.tsx`,
-branch `onDragEnd` on `targetTrackIndex === sourceTrackIndex` to use it
-instead of `resolveDropPosition` for the same-track case, keep
-`resolveCrossTrackDrop` for the cross-track case, then re-verify against the
-previously-passing scenarios before considering this closed:
-
-- Same-track simple slide (no reorder) — must still be pixel-exact.
-- Same-track reorder (drag clip A past clip B) — must now trigger on
-  crossing B's midpoint, not require clearing its full width.
-- Cross-track move — must be unaffected.
-- No console errors, playback still works after each.
+That whole approach is now moot: `resolveDropPosition` in `ClipDragLayer.tsx`
+no longer does any neighbor/collision math at all. Clips can be dropped
+anywhere, including fully overlapping another clip on the same track or a
+different one — this is an intentional product decision (smooth "place a clip
+wherever you want" UX), not a regression to fix. See `resolveDropPosition`'s
+and `ClipDragLayer`'s own doc comments for the reasoning, and "Known
+limitations" below for the trade-offs this brings.
 
 ## Known limitations (disclosed, not silently accepted)
 
-- Cross-track collision is enforced only at drop, not with live visual
-  feedback during the drag.
+- **Clip overlap is unconstrained by design** — dragging a clip (same-track or
+  cross-track) never blocks or clamps against a neighbor; it can land fully on
+  top of another clip. This is intentional (see "Superseded issue" above), not
+  a bug, but it has real trade-offs: (1) a fully-covered clip becomes
+  unclickable/untrimmable until the covering clip is moved away again (the
+  dropped clip is always appended last to its track's array, so it renders on
+  top and intercepts pointer events); (2) boundary trims still go through the
+  library's own untouched `engine.trimClip()`/`constrainBoundaryTrim`, which
+  computes its allowed range assuming the nearest sorted neighbor isn't
+  already overlapping — trimming a clip that's already overlapping another can
+  produce a smaller-than-dragged result (clamped by `minDuration` first). No
+  crash or corrupted state in either case, just unintuitive in that specific
+  combination.
 - No undo/redo wiring for clip moves. Correction to an earlier note here:
   this applies to *every* accepted drop, not just reorders/cross-track —
   `onDragEnd` discards the engine's own in-flight transaction

@@ -2,7 +2,6 @@
 
 import { useCallback, useRef, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { DragDropProvider } from "@dnd-kit/react";
-import { constrainClipDrag } from "@waveform-playlist/engine";
 import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
 import {
   ClipInteractionProvider,
@@ -52,36 +51,32 @@ type DragEndEventArg = Parameters<OnDragEnd>[0];
 type LibraryDragHandler = (event: never) => void;
 
 /**
- * Finds where `clip` actually lands if dropped at `proposedStartSample`
- * among `otherClips` (the target track's clips, excluding this one), and
- * clamps only enough to avoid overlapping whichever clip ends up adjacent to
- * that *proposed* position.
+ * Where `clip` lands if dropped at `proposedStartSample`: clamped only to
+ * not land before the timeline start (sample 0).
  *
- * This is deliberately not engine.moveClip()'s approach: that constrains
- * movement relative to the clip's neighbors *at drag-start*, computed once
- * and held fixed — so a clip can only slide within its current gap and can
- * never cross a neighbor to reorder past it. Anchoring the neighbor lookup
- * to the proposed drop position instead (via constrainClipDrag with a zero
- * delta, reusing the engine's own overlap math) allows a clip to be dropped
- * before an earlier clip, same as dragging it to any other open slot.
+ * Deliberately no neighbor/collision constraint here — this is not
+ * engine.moveClip()'s approach (which restricts a clip to sliding within its
+ * gap at drag-start and can never cross a neighbor). Clips are allowed to
+ * land anywhere, including fully overlapping another clip on the same track,
+ * so the user can place a clip wherever they want without fighting layout
+ * constraints. Overlap is a supported end state, not a transient one: Tone.js
+ * schedules each clip as its own independent buffer source, so overlapping
+ * clips just mix together in playback — see CLAUDE.md for the verification
+ * notes on this. The moved clip is always appended last to its track's
+ * clips array (see onDragEnd below), so on overlap it renders on top.
  */
 function resolveDropPosition(
-  clip: AudioClip,
-  proposedStartSample: number,
-  otherClips: AudioClip[]
+  proposedStartSample: number
 ): number {
-  const proposedClip = { ...clip, startSample: Math.max(0, proposedStartSample) };
-  const merged = [...otherClips, proposedClip].sort(
-    (a, b) => a.startSample - b.startSample
-  );
-  const mergedIndex = merged.findIndex((c) => c.id === clip.id);
-  const constrainedDelta = constrainClipDrag(proposedClip, 0, merged, mergedIndex);
-  return Math.max(0, Math.floor(proposedClip.startSample + constrainedDelta));
+  return Math.max(0, Math.floor(proposedStartSample));
 }
 
 /**
- * Enables clip dragging with cross-track support and free reordering within
- * a track.
+ * Enables clip dragging with cross-track support and free placement within
+ * a track — including on top of another clip. This is intentional: dropped
+ * clips are never pushed apart or blocked by a neighbor, so the user can
+ * place a clip anywhere without fighting collision constraints. See
+ * resolveDropPosition's doc comment for why overlap is safe to allow.
  *
  * The library's own ClipInteractionProvider is a turnkey drag layer, but it
  * unconditionally applies a horizontal-axis restriction, and its onDragEnd
@@ -94,7 +89,7 @@ function resolveDropPosition(
  * takes over the actual interaction — ClipInteractionProvider's own outer
  * one ends up with nothing registered.
  *
- * Every clip *move* (same-track reorder or cross-track) goes through
+ * Every clip *move* (same-track or cross-track) goes through
  * resolveDropPosition and is applied by reassigning the tracks array
  * directly via onTracksChange — the same "external update" path used
  * everywhere else in this app (import, remove, add track). Boundary trims
@@ -193,9 +188,7 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       const proposedStartSample = clip.startSample + sampleDelta;
       const otherClips = targetTrack.clips.filter((c) => c.id !== clip.id);
       const newStartSample = resolveDropPosition(
-        clip,
-        proposedStartSample,
-        otherClips
+        proposedStartSample
       );
 
       const newTracks: ClipTrack[] = tracks.map((track, index) => {

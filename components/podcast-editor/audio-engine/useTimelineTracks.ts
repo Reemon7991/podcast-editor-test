@@ -51,7 +51,7 @@ export function useTimelineTracks() {
    * NOT re-lay-out clips the user has since dragged elsewhere on the track.
    */
   const addFilesToTrack = useCallback(
-    (trackId: string, files: File[], gapSeconds: number) => {
+    (trackId: string, files: File[], insertionTimeSeconds: number) => {
       if (files.length === 0) return;
       setLoadingCount((c) => c + files.length);
 
@@ -68,10 +68,8 @@ export function useTimelineTracks() {
         setTracks((prev) =>
           prev.map((track) => {
             if (track.id !== trackId) return track;
-            let cursor = track.clips.reduce(
-              (max, c) => Math.max(max, c.startSample + c.durationSamples),
-              0
-            );
+            let cursor = 0;
+            let cursorInitialized = false;
             const appended: AudioClip[] = [];
             for (const result of results) {
               if (result.status === "rejected") {
@@ -82,11 +80,11 @@ export function useTimelineTracks() {
                 continue;
               }
               const { file, audioBuffer } = result.value;
-              const gapSamples =
-                track.clips.length === 0 && appended.length === 0
-                  ? 0
-                  : Math.round(gapSeconds * audioBuffer.sampleRate);
-              const startSample = cursor + gapSamples;
+              if (!cursorInitialized) {
+                cursor = Math.round(insertionTimeSeconds * audioBuffer.sampleRate);
+                cursorInitialized = true;
+              }
+              const startSample: number = cursor;
               appended.push({
                 id: crypto.randomUUID(),
                 audioBuffer,

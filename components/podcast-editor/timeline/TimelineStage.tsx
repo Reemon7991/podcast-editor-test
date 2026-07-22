@@ -13,6 +13,8 @@ interface TimelineStageProps {
    *  engine rebuild until the whole import batch settles, so adding several
    *  files doesn't trigger a rebuild per file. */
   deferEngineRebuild: boolean;
+  onAddTrack: () => void;
+  onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
 }
 
 export function TimelineStage({
@@ -20,6 +22,8 @@ export function TimelineStage({
   onTracksChange,
   onRemoveTrack,
   deferEngineRebuild,
+  onAddTrack,
+  onAddFilesToTrack,
 }: TimelineStageProps) {
   const [providerError, setProviderError] = useState<string | null>(null);
 
@@ -43,7 +47,11 @@ export function TimelineStage({
       deferEngineRebuild={deferEngineRebuild}
       onError={(err) => setProviderError(err.message)}
     >
-      <EditorShell onRemoveTrack={onRemoveTrack} />
+      <EditorShell
+        onRemoveTrack={onRemoveTrack}
+        onAddTrack={onAddTrack}
+        onAddFilesToTrack={onAddFilesToTrack}
+      />
     </WaveformPlaylistProvider>
   );
 }
