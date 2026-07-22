@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, type ComponentProps, type ReactNode, type RefObject } from "react";
+import { useCallback, useRef, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { DragDropProvider } from "@dnd-kit/react";
 import { constrainClipDrag } from "@waveform-playlist/engine";
 import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
 import {
   ClipInteractionProvider,
+  usePlaybackAnimation,
   usePlaylistData,
   usePlaylistControls,
   useClipDragHandlers,
@@ -112,8 +113,21 @@ export function ClipDragLayer({ children, playPendingRef }: ClipDragLayerProps) 
 function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps) {
   const { tracks, samplesPerPixel, playoutRef, isDraggingRef, onTracksChange } =
     usePlaylistData();
-  const { setSelectedTrackId } = usePlaylistControls();
+  const { setSelectedTrackId, scrollContainerRef, stop } = usePlaylistControls();
+  const { isPlaying } = usePlaybackAnimation();
   const sensors = useDragSensors();
+
+  // dnd-kit's auto-scroll (@dnd-kit/dom's Scroller plugin) moves the
+  // container by mutating `element.scrollLeft` directly — it never touches
+  // the drag operation's own position/transform, which stays pure
+  // pointer-coordinate delta throughout. So if a drag auto-scrolls (or the
+  // container scrolls at all mid-drag), transform.x alone under-reports how
+  // far the drop target actually moved in content space, and the collision
+  // clamp below silently snaps the clip back near its original neighbors —
+  // this is why reordering "does nothing" once a drag needs to scroll to
+  // reach its target. Capturing scrollLeft at drag start and folding its
+  // delta into the sample math at drop time corrects for it.
+  const dragStartScrollLeftRef = useRef(0);
 
   const {
     onDragStart: libraryOnDragStart,
@@ -129,13 +143,14 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
 
   const onDragStart = useCallback(
     (event: DragStartEventArg) => {
+      dragStartScrollLeftRef.current = scrollContainerRef.current?.scrollLeft ?? 0;
       const data = event.operation?.source?.data as ClipSourceData | undefined;
       if (data && tracks[data.trackIndex]) {
         setSelectedTrackId(tracks[data.trackIndex].id);
       }
       (libraryOnDragStart as LibraryDragHandler)(event as never);
     },
-    [libraryOnDragStart, tracks, setSelectedTrackId]
+    [libraryOnDragStart, tracks, setSelectedTrackId, scrollContainerRef]
   );
 
   const onDragEnd = useCallback(
@@ -170,7 +185,11 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
         return;
       }
 
-      const sampleDelta = event.operation.transform.x * samplesPerPixel;
+      const scrollDeltaPx =
+        (scrollContainerRef.current?.scrollLeft ?? dragStartScrollLeftRef.current) -
+        dragStartScrollLeftRef.current;
+      const sampleDelta =
+        (event.operation.transform.x + scrollDeltaPx) * samplesPerPixel;
       const proposedStartSample = clip.startSample + sampleDelta;
       const otherClips = targetTrack.clips.filter((c) => c.id !== clip.id);
       const newStartSample = resolveDropPosition(
@@ -201,6 +220,17 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
         return track;
       });
 
+      // Committing a move while playing hands the provider's own auto-resume-
+      // after-rebuild logic, which has the same check-then-act race as the
+      // play()/rebuild one above but fires unconditionally (100% reproducible,
+      // not timing-dependent) — see CLAUDE.md's "editing while already
+      // playing" section for the full trace. `stop()` is synchronous, so
+      // calling it here batches with the state update below into one commit,
+      // and the rebuild effect never sees playback as active.
+      if (isPlaying) {
+        stop();
+      }
+
       // No engine.moveClip()/trimClip() call was made on this transaction —
       // discard it rather than leave it open for the next operation.
       playoutRef.current?.abortTransaction();
@@ -214,6 +244,9 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       playoutRef,
       isDraggingRef,
       playPendingRef,
+      scrollContainerRef,
+      isPlaying,
+      stop,
       libraryOnDragEnd,
     ]
   );

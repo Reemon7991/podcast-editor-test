@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef } from "react";
-import { Waveform, usePlaylistData } from "@waveform-playlist/browser";
+import { useEffect, useRef } from "react";
+import { Waveform, usePlaylistData, usePlaylistControls } from "@waveform-playlist/browser";
 import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
 
@@ -15,10 +15,37 @@ interface EditorShellProps {
  */
 export function EditorShell({ onRemoveTrack }: EditorShellProps) {
   const { isReady } = usePlaylistData();
+  const { scrollContainerRef } = usePlaylistControls();
   // Owned here (not inside PlayButton/ClipDragLayer) since both need it —
   // see the doc comments on transport/PlayButton.tsx and
   // timeline/ClipDragLayer.tsx for the play()/rebuild race this closes.
   const playPendingRef = useRef(false);
+
+  // Every accepted clip move triggers a full engine rebuild (isReady flips
+  // false then true), which tears down and remounts <Waveform> below.
+  // attempted to keep it permanently mounted instead, but that caused another bug.
+  // So: remount stays, and scroll position is preserved around it manually: track it continuously while
+  // a container exists, restore it once the next one mounts.
+  const savedScrollLeftRef = useRef(0);
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      savedScrollLeftRef.current = container.scrollLeft;
+    };
+    container.addEventListener("scroll", onScroll);
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [isReady, scrollContainerRef]);
+
+  // Restores on every render (not just the isReady false->true transition)
+  // rather than a single one-shot effect — cheap, and avoids depending on
+  // exactly which render the new container first appears on.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (isReady && container && container.scrollLeft !== savedScrollLeftRef.current) {
+      container.scrollLeft = savedScrollLeftRef.current;
+    }
+  });
 
   return (
     <div className="flex flex-col gap-3">

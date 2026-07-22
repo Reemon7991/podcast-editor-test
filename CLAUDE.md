@@ -1,15 +1,20 @@
 @AGENTS.md
 
-# Podcast Editor — @waveform-playlist/browser Evaluation
+# Podcast Editor — browser multi-track podcast editor (production-hardening)
 
-This is a **proof of concept**, not a production app. The goal is to evaluate
-whether `@waveform-playlist/browser` is a suitable foundation for a
-browser-based podcast/multi-track editor — performance, stability, developer
-experience, and how far its built-in abstractions actually stretch before you
-have to drop into custom code. Every non-obvious decision below exists
-because of something concretely discovered while building this, not
-speculation — treat this file as the fastest way to avoid re-deriving that
-work in a future session.
+Built on `@waveform-playlist/browser`. **Started as a proof-of-concept**
+evaluating whether that library was a suitable foundation for a
+browser-based podcast/multi-track editor — the early sections of this file
+still reflect that phase (performance, stability, developer experience, how
+far its built-in abstractions stretch before you have to drop into custom
+code). **The project has since moved into production-hardening**: real bugs
+found via reading app and library sources directly, fixed, and verified
+end-to-end via Playwright against production builds — not just probing the
+library's fit anymore. It is not yet shippable — see "Known limitations" for
+the concrete gaps still open (persistence, export, a committed test suite,
+undo/redo). Every non-obvious decision below exists because of something
+concretely discovered while building this, not speculation — treat this file
+as the fastest way to avoid re-deriving that work in a future session.
 
 ## Current feature state
 
@@ -19,8 +24,45 @@ work in a future session.
    sequentially or with a gap, play as one continuous timeline) — done,
    verified.
 3. Multi-track + clip dragging (multiple tracks, drag clips horizontally
-   within a track, drag clips vertically to another track) — **implemented,
-   one known bug in progress** (see "Open issue" below).
+   within a track, drag clips vertically to another track) — implemented;
+   known issues tracked in "Open issue" below and in
+   `timeline/EditorShell.tsx`'s own doc comment (the scroll-reset-on-rebuild
+   history, including a real vendored-library bug found along the way that
+   is diagnosed but **not actually patched** — no `patch-package` setup or
+   `patches/` directory exists in this repo despite earlier documentation
+   here claiming otherwise), not all of them closed — check those before
+   assuming a fix is live in the current code.
+
+## Planned features (not started)
+
+None of the following exist yet — no partial implementation, no dedicated
+branch. Listed here so a future session picks the right next slice of work
+instead of re-deriving this list from a feature request. Roughly in the
+order they'd naturally unblock each other (persistence/undo before export
+makes sense to build on top of; split/fades and effects are independent of
+those two; the AI features are the most speculative and probably last).
+
+1. **Persistence** — project state (tracks/clips/gaps, decoded audio) survives
+   a reload. Nothing currently does; all state lives in React state only.
+2. **Undo/redo** — the library's own `WaveformPlaylistProvider` context
+   already exposes `undo`/`redo`/`canUndo`/`canRedo` (confirmed in
+   `@waveform-playlist/browser`'s public `.d.ts`), but those only cover
+   engine-driven transactions. This needs command/history layer (reducer/command-pattern store) so that every mutation — add/remove track, import clips, move/trim/reorder a clip — becomes an explicit command with a do/undo pair, tracked in our own application state, independent of the library's internal (and only partially applicable) undo system.
+3. **Export** — render the mixdown (all tracks/clips/gains) to an audio file
+   the user can download. Currently the editor can only play back in-browser;
+   there's no way to get audio out of it at all.
+4. **Split and fade in / fade out** — clip-level editing beyond move/trim.
+   The library's `Clip` props already include `fadeIn`/`fadeOut` fields and a
+   `showFades` flag (see the peaks-rendering code referenced in "Clip
+   moves") — we just never enable it (`<Waveform>` is rendered without
+   `showFades` in `EditorShell.tsx`). Worth checking how much of the
+   rendering side the library already covers before building fade UI from
+   scratch.
+5. **Audio effects** — per-clip or per-track processing (EQ, compression,
+   gain automation, etc. — scope not yet defined).
+6. **AI features** — noise removal, humming removal, silence removal.
+   Almost certainly needs server-side processing (not in-browser WebAudio) —
+   scope, model/service choice, and where the compute runs are all open.
 
 ## Architecture
 
@@ -215,6 +257,57 @@ The fix is correct by inspection (the ref flips synchronously around the
 `await`, checked synchronously in `onDragEnd`) and introduces no regression
 to normal playback or dragging, but treat "closes the race" as unverified at
 runtime, not proven.
+
+### A second, unrelated instance of the same race — editing *while already playing* (FIXED)
+
+Distinct from the one above and much easier to hit: the `playPendingRef`
+guard only covers a *new* `play()` call racing an in-flight rebuild. It does
+nothing once playback is already underway (`playPendingRef.current` is
+`false` again by then — `PlayButton.tsx` clears it in its `finally` block as
+soon as `play()` resolves). Dragging a clip while audio is actively playing
+was reproducible **100% of the time**, no throttling or timing luck needed
+(confirmed via Playwright, both a direct repro and an A/B with the fix
+reverted): `console.warn("[waveform-playlist] adapter.play() called but no
+playout is available...")` during the drag, then every subsequent Play click
+throws the same `TonePlayout not initialized` permanently — the app is stuck
+until reload, matching the user-reported "it kind of crashes."
+
+Root cause, confirmed by reading `@waveform-playlist/browser`'s dist source
+directly (`dist/index.js` around the `wasPlaying`/`pendingResumeRef`/
+`resumePlayback` effect, ~line 2177 and ~line 2615): the provider has its
+*own* internal "auto-resume playback across a rebuild" mechanism, entirely
+separate from `PlayButton.tsx`/`playPendingRef`. When a rebuild starts while
+`isPlayingRef.current` is `true`, it stops the old engine and stashes
+`pendingResumeRef.current = { position }` for a **separate** effect (keyed on
+the same `tracks` dependency) to pick up and resume on the new engine once
+built. But that separate effect runs synchronously, in the same commit,
+immediately after the rebuild effect kicks off `loadAudio()` (an
+unawaited async function) — and everything in `loadAudio()` up to its first
+real `await` (disposing the old engine, resetting
+`audioInitializedRef.current = false`) runs synchronously before that. So
+`resumePlayback()` sees `engineRef.current` still pointing at the just-disposed
+old engine, calls `.init()` on *that*, wrongly marks
+`audioInitializedRef.current = true`, and by the time the *actual* new engine
+is later assigned to `engineRef.current`, the app believes it's already
+initialized when it never was — every future `play()` skips `init()` and
+fails identically, forever.
+
+Not patchable inside the vendored bundle for the same reasons as above, so
+the fix again closes the *trigger* rather than the internals: `ClipDragLayer.tsx`'s
+`onDragEnd` now calls `stop()` (from `usePlaylistControls`) before committing
+any move while `usePlaybackAnimation().isPlaying` is `true`. `stop()` is
+fully synchronous (confirmed by reading its source — no `await` at all), so
+it batches into the same React commit as the `onTracksChange` that follows,
+and by the time the provider's rebuild effect reads `isPlayingRef.current` it
+already sees `false` — `pendingResumeRef` never gets armed, and the buggy
+`resumePlayback` path never runs at all. Deliberate UX consequence: editing a
+clip while playing now stops playback (same as most DAWs), rather than
+silently continuing on a corrupted engine.
+
+**Verification**: confirmed fixed via Playwright, both directly (play → drag
+mid-playback → play again, repeated twice, zero errors) and via A/B with the
+fix reverted (reliably reproduces both the mid-drag warning and the
+permanently-disabled Play button afterward).
 
 ## Verification approach (no permanent test suite)
 
