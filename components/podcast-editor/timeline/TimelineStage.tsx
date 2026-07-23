@@ -15,6 +15,8 @@ interface TimelineStageProps {
   deferEngineRebuild: boolean;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
+  onDuplicateClip: (trackId: string, clipId: string) => void;
+  onDeleteClip: (trackId: string, clipId: string) => void;
 }
 
 export function TimelineStage({
@@ -24,6 +26,8 @@ export function TimelineStage({
   deferEngineRebuild,
   onAddTrack,
   onAddFilesToTrack,
+  onDuplicateClip,
+  onDeleteClip,
 }: TimelineStageProps) {
   const [providerError, setProviderError] = useState<string | null>(null);
 
@@ -51,6 +55,8 @@ export function TimelineStage({
         onRemoveTrack={onRemoveTrack}
         onAddTrack={onAddTrack}
         onAddFilesToTrack={onAddFilesToTrack}
+        onDuplicateClip={onDuplicateClip}
+        onDeleteClip={onDeleteClip}
       />
     </WaveformPlaylistProvider>
   );

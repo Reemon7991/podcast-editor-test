@@ -4,19 +4,28 @@ import { useCallback, useEffect, useRef } from "react";
 import { Waveform, usePlaylistData, usePlaylistControls, usePlaylistState } from "@waveform-playlist/browser";
 import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
+import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { TRACK_ROW_HEIGHT_PX } from "./trackLayout";
 
 interface EditorShellProps {
   onRemoveTrack: (trackIndex: number) => void;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
+  onDuplicateClip: (trackId: string, clipId: string) => void;
+  onDeleteClip: (trackId: string, clipId: string) => void;
 }
 
 /**
  * Renders inside WaveformPlaylistProvider. Split out from AudioTrackLoader so
  * this subtree only mounts once the provider context actually exists.
  */
-export function EditorShell({ onRemoveTrack, onAddTrack, onAddFilesToTrack }: EditorShellProps) {
+export function EditorShell({
+  onRemoveTrack,
+  onAddTrack,
+  onAddFilesToTrack,
+  onDuplicateClip,
+  onDeleteClip,
+}: EditorShellProps) {
   const { isReady, tracks, timeScaleHeight } = usePlaylistData();
   const { selectedTrackId } = usePlaylistState();
   const { scrollContainerRef, setSelectedTrackId } = usePlaylistControls();
@@ -129,6 +138,7 @@ export function EditorShell({ onRemoveTrack, onAddTrack, onAddFilesToTrack }: Ed
             >
               <Waveform showClipHeaders onRemoveTrack={onRemoveTrack} />
             </div>
+            <ClipActionsOverlay onDuplicateClip={onDuplicateClip} onDeleteClip={onDeleteClip} />
             <div className="flex w-[180px] justify-center border-t border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900">
               <button
                 type="button"

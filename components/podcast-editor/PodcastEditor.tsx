@@ -3,10 +3,12 @@
 import { useCallback } from "react";
 import { TimelineStage } from "./timeline/TimelineStage";
 import { useTimelineTracks } from "./audio-engine/useTimelineTracks";
+import { useClipActions } from "./audio-engine/useClipActions";
 
 export function PodcastEditor() {
   const { tracks, setTracks, addTrack, removeTrack, addFilesToTrack, isLoading } =
     useTimelineTracks();
+  const { duplicateClip, deleteClip } = useClipActions({ setTracks });
 
   // WaveformPlaylistProvider's onRemoveTrack gives a track *index* (it's a
   // Waveform-level UI callback, not aware of our id-keyed state) — resolve it
@@ -28,6 +30,8 @@ export function PodcastEditor() {
         deferEngineRebuild={isLoading}
         onAddTrack={addTrack}
         onAddFilesToTrack={addFilesToTrack}
+        onDuplicateClip={duplicateClip}
+        onDeleteClip={deleteClip}
       />
     </div>
   );
