@@ -5,7 +5,7 @@ import { Waveform, usePlaylistData, usePlaylistControls, usePlaylistState } from
 import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
 import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
-import { TRACK_ROW_HEIGHT_PX } from "./trackLayout";
+import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 
 interface EditorShellProps {
   onRemoveTrack: (trackIndex: number) => void;

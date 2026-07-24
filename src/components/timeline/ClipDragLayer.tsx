@@ -12,7 +12,7 @@ import {
   useDragSensors,
   noDropAnimationPlugins,
 } from "@waveform-playlist/browser";
-import { TRACK_ROW_HEIGHT_PX } from "./trackLayout";
+import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 
 interface ClipSourceData {
   trackIndex: number;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, type Dispatch, type SetStateAction } from "react";
-import type { ClipMeta, TrackMeta } from "./persistence/types";
+import type { ClipMeta, TrackMeta } from "../utils/types";
 
 interface UseClipActionsOptions {
   setTracks: Dispatch<SetStateAction<TrackMeta[]>>;

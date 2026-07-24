@@ -1,5 +1,5 @@
 import type { ClipTrack } from "@waveform-playlist/browser";
-import { TRACK_ROW_HEIGHT_PX } from "../timeline/trackLayout";
+import { TRACK_ROW_HEIGHT_PX } from "./trackLayout";
 
 export interface ClipHit {
   trackIndex: number;

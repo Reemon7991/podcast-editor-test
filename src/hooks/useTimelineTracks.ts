@@ -2,8 +2,8 @@
 
 import { useCallback, useState } from "react";
 import * as Tone from "tone";
-import { hashFileBytes, registerAsset } from "./persistence/assetRegistry";
-import type { ClipMeta, TrackMeta } from "./persistence/types";
+import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
+import type { ClipMeta, TrackMeta } from "../utils/types";
 
 function createEmptyTrack(index: number): TrackMeta {
   return {

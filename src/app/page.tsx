@@ -1,4 +1,4 @@
-import { PodcastEditorLoader } from "@/components/podcast-editor/PodcastEditorLoader";
+import { PodcastEditorLoader } from "@/components/PodcastEditorLoader";
 
 export default function Home() {
   return (

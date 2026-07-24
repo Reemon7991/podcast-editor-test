@@ -3,9 +3,9 @@
 import { useCallback, useState } from "react";
 import { WaveformPlaylistProvider, type ClipTrack } from "@waveform-playlist/browser";
 import { EditorShell } from "./EditorShell";
-import { TRACK_WAVE_HEIGHT } from "./trackLayout";
-import { dehydrate, hydrate } from "../audio-engine/persistence/clipHydration";
-import type { TrackMeta } from "../audio-engine/persistence/types";
+import { TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
+import { dehydrate, hydrate } from "../../utils/clipHydration";
+import type { TrackMeta } from "../../utils/types";
 
 interface TimelineStageProps {
   tracks: TrackMeta[];

@@ -79,37 +79,73 @@ those two; the AI features are the most speculative and probably last).
 ## Architecture
 
 ```text
-app/page.tsx                              server component, renders PodcastEditorLoader
-components/podcast-editor/
-  PodcastEditorLoader.tsx                 next/dynamic(ssr:false) wrapper — REQUIRED, see below
-  PodcastEditor.tsx                       top-level state owner: useTimelineTracks; threads addTrack/addFilesToTrack down to TimelineStage
-  audio-engine/
-    useTimelineTracks.ts                  tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack(trackId, files, insertionTimeSeconds)
-  timeline/
-    TimelineStage.tsx                     wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
-    EditorShell.tsx                       TransportControls + "New Track" button + ClipDragLayer(<Waveform showClipHeaders/>); also does manual track-click selection (see "Track selection" below)
-    ClipDragLayer.tsx                     custom drag interaction layer — see "Clip dragging" below
-    trackLayout.ts                        TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
-  transport/
-    TransportControls.tsx                 PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time + "Upload clip" file input (inserts into the active track at the current playhead position)
-    PlaybackTime.tsx                      live time display, registerFrameCallback-driven (NOT React state)
-    DurationLabel.tsx                     total duration display
+src/
+  app/page.tsx                             server component, renders PodcastEditorLoader
+  components/
+    PodcastEditorLoader.tsx                next/dynamic(ssr:false) wrapper — REQUIRED, see below
+    PodcastEditor.tsx                      top-level state owner: useTimelineTracks; threads addTrack/addFilesToTrack down to TimelineStage
+    timeline/
+      TimelineStage.tsx                    wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
+      EditorShell.tsx                      TransportControls + "New Track" button + ClipDragLayer(<Waveform showClipHeaders/>); also does manual track-click selection (see "Track selection" below)
+      ClipDragLayer.tsx                    custom drag interaction layer — see "Clip dragging" below
+    transport/
+      TransportControls.tsx                PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time + "Upload clip" file input + UndoRedoButtons (see "Persistence + Undo/Redo layer" below)
+      PlaybackTime.tsx                     live time display, registerFrameCallback-driven (NOT React state)
+      DurationLabel.tsx                    total duration display
+    clip-menu/
+      ClipActionsOverlay.tsx               per-clip "..." menu (split/duplicate/delete), positioned over whichever clip the pointer is on
+      ClipActionsMenu.tsx                  generic "..." trigger + dropdown, reusable beyond clips
+  hooks/
+    useTimelineTracks.ts                   tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack(trackId, files, insertionTimeSeconds)
+    useClipActions.ts                      duplicate/delete clip mutations
+    useScissorsSplit.ts                    "click a clip to choose a split point" mode
+  utils/
+    trackLayout.ts                         TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
+    clipGeometry.ts                        pixel↔sample hit-testing shared by ClipActionsOverlay/useScissorsSplit/ClipDragLayer
+    types.ts, assetRegistry.ts,
+    clipHydration.ts                       see "Persistence + Undo/Redo layer" below
+  store/
+    projectStore.ts                        see "Persistence + Undo/Redo layer" below
 ```
 
 There is no `import/` folder anymore — `TrackListBar.tsx` (the old top-of-page
 "Add track"/"Add clip" bar) was removed and its two responsibilities moved
-into the folders that already own that concern: adding a track lives in
+into the components that already own that concern: adding a track lives in
 `timeline/EditorShell.tsx` (the "New Track" button, since it's laid out under
 the waveform's track-controls column), and adding clips lives in
 `transport/TransportControls.tsx` (the "Upload clip" button, since it needs
 the live playhead position from the same context transport controls already
-read). Feature folders otherwise still group by concern, not by original
-evaluation order: `audio-engine/` owns track/clip state and decoding,
-`timeline/` owns the waveform stage and clip drag interaction, `transport/`
-owns playback controls/time display and file intake. Cross-folder imports are
-relative (`../transport/TransportControls`); same-folder imports stay `./`.
-Every file under `components/podcast-editor/` is `"use client"`. Nothing
-outside this folder needs to change to extend the feature set further.
+read). Component subfolders still group by concern, not by original
+evaluation order: `timeline/` owns the waveform stage and clip drag
+interaction, `transport/` owns playback controls/time display and file
+intake, `clip-menu/` owns the per-clip actions menu — `hooks/`, `utils/`, and
+`store/` are the cross-cutting layers those draw on (React state, pure
+logic/constants, and the undo/redo-aware store, respectively). Cross-folder
+imports are relative. Every file under `src/components/`, `src/hooks/`, and
+`src/store/` is `"use client"`; `src/utils/` files are plain TS with no
+React/DOM dependency at module scope, so they don't carry the directive
+themselves, but only ever run inside a client tree.
+
+**Project-wide layer-based restructuring (done):** this `src/{app,components,
+hooks,utils,store}` layout replaced a flatter `app/` + `components/podcast-
+editor/{audio-engine,timeline,transport,clip-menu}` one — a standard
+React/Next.js layout, requested explicitly (not something any feature plan
+called for on its own), applied in one pass across the whole project rather
+than scoped to whatever feature happened to be in progress at the time
+(persistence/undo-redo, see below). Every file moved via `git mv` (history
+preserved), every relative import fixed by hand; `tsc --noEmit`, `eslint`,
+`npm run build`, and the full Playwright suite all re-run clean afterward
+(the stale `.next/` build cache had to be deleted once — it still referenced
+the old `app/` path). Key mapping, if a future session needs to find
+something by its old path: `audio-engine/useTimelineTracks.ts`/
+`useClipActions.ts` → `hooks/`; `audio-engine/persistence/
+{clipHydration,assetRegistry,types}.ts` → `utils/` (flattened, no
+`persistence/` subfolder anymore); `clip-menu/clipGeometry.ts` and
+`timeline/trackLayout.ts` (pure functions/constants, no React) → `utils/`
+too; `clip-menu/useScissorsSplit.ts` (a hook, not a pure util) → `hooks/`;
+everything else (JSX components) stayed under `components/`, just one level
+shallower — no more `podcast-editor/` wrapper, since the whole project is the
+podcast editor.
 
 ## Persistence + Undo/Redo layer (in progress)
 
@@ -134,11 +170,11 @@ script), `e2e/helpers.ts`, `e2e/playback.spec.ts`. `npm run test:e2e` runs it.
 
 ### Phase 1 — Metadata/hydration boundary (done)
 
-New `audio-engine/persistence/` subfolder: `types.ts` (`ClipMeta`/`TrackMeta`
-— `AudioClip`/`ClipTrack` minus `audioBuffer`, plus a content-hash `assetId`),
-`assetRegistry.ts` (buffer↔assetId lookup table — `assetId` is minted from
-`SHA-256(file bytes)`, not a random UUID, so two independent uploads of
-identical bytes dedupe for free once persistence exists), `clipHydration.ts`
+New `utils/types.ts` (`ClipMeta`/`TrackMeta` — `AudioClip`/`ClipTrack` minus
+`audioBuffer`, plus a content-hash `assetId`), `utils/assetRegistry.ts`
+(buffer↔assetId lookup table — `assetId` is minted from `SHA-256(file
+bytes)`, not a random UUID, so two independent uploads of identical bytes
+dedupe for free once persistence exists), `utils/clipHydration.ts`
 (`hydrate`/`dehydrate` plus a per-track memoization cache). `TimelineStage.tsx`
 is now the sole choke point between app state (`TrackMeta[]`) and the
 hydrated `ClipTrack[]` shape `WaveformPlaylistProvider` actually needs.

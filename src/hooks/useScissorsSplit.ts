@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type RefObject } from "react";
 import type { ClipTrack } from "@waveform-playlist/browser";
-import { resolveClipAt, contentXFromClientX } from "./clipGeometry";
+import { resolveClipAt, contentXFromClientX } from "../utils/clipGeometry";
 
 interface UseScissorsSplitOptions {
   scrollContainerRef: RefObject<HTMLDivElement | null>;

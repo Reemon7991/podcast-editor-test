@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { usePlaylistControls, usePlaylistData, useClipSplitting } from "@waveform-playlist/browser";
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
-import { useScissorsSplit } from "./useScissorsSplit";
-import { resolveClipAt, clipPixelWidth } from "./clipGeometry";
-import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../timeline/trackLayout";
+import { useScissorsSplit } from "../../hooks/useScissorsSplit";
+import { resolveClipAt, clipPixelWidth } from "../../utils/clipGeometry";
+import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
 
 // The header row reserved by <Waveform showClipHeaders> — derived rather
 // than a third hardcoded "22" (trackLayout.ts's own copy is intentionally

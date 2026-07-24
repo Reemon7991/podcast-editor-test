@@ -2,8 +2,8 @@
 
 import { useCallback } from "react";
 import { TimelineStage } from "./timeline/TimelineStage";
-import { useTimelineTracks } from "./audio-engine/useTimelineTracks";
-import { useClipActions } from "./audio-engine/useClipActions";
+import { useTimelineTracks } from "../hooks/useTimelineTracks";
+import { useClipActions } from "../hooks/useClipActions";
 
 export function PodcastEditor() {
   const { tracks, setTracks, addTrack, removeTrack, addFilesToTrack, isLoading } =
