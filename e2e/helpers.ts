@@ -33,6 +33,40 @@ export async function waitForWaveformReady(page: Page) {
   await page.getByText("Building waveform…").waitFor({ state: "hidden" });
 }
 
+type RebuildProbeWindow = { __rebuildCount: number };
+
+/**
+ * Navigates to the editor with a `"waveform-playlist:ready"` counter installed
+ * via `page.addInitScript` — i.e. wired up before any of the page's own
+ * scripts run, so it's guaranteed to catch the very first rebuild (the
+ * initial mount) with no race window. Use this instead of a bare
+ * `page.goto("/")` in any test that will later call `rebuildsEngine()`.
+ *
+ * This matters because the DOM-visible "Building waveform…" placeholder
+ * clearing (what `waitForWaveformReady` watches) and the library's own
+ * `"waveform-playlist:ready"` CustomEvent dispatch are not strictly ordered
+ * relative to each other — confirmed empirically (dispatch was observed
+ * firing a few hundred ms *after* the placeholder had already cleared, for
+ * the initial mount's own build). A `rebuildsEngine()` call that attached its
+ * listener fresh right after `waitForWaveformReady()` resolved could catch
+ * that late-arriving *initial-mount* event and misattribute it to whatever
+ * action ran immediately after — exactly what happened here initially: the
+ * "adding a track does not rebuild" test has no other async work between
+ * page load and the action to absorb that race, so it saw the leftover
+ * initial-mount event and reported a false rebuild. Counting from before
+ * first navigation removes the race entirely: `rebuildsEngine()` only ever
+ * compares a before/after snapshot of one continuously-running counter.
+ */
+export async function gotoEditor(page: Page) {
+  await page.addInitScript(() => {
+    (window as unknown as RebuildProbeWindow).__rebuildCount = 0;
+    window.addEventListener("waveform-playlist:ready", () => {
+      (window as unknown as RebuildProbeWindow).__rebuildCount += 1;
+    });
+  });
+  await page.goto("/");
+}
+
 /**
  * Uploads via the hidden file input directly (Playwright's setInputFiles
  * doesn't require the target to be visible), rather than clicking the
@@ -49,17 +83,18 @@ export async function uploadFiles(page: Page, files: UploadFile[]) {
   await waitForWaveformReady(page);
 }
 
-type RebuildProbeWindow = {
-  __rebuildCount: number;
-  __rebuildListener?: EventListener;
-};
-
 /**
  * Runs `action`, and reports whether it caused a full Tone.js engine
  * dispose+rebuild — used to assert Phase 1's hydrate()/dehydrate() caches
  * (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md's "Confirmed library behavior"
  * section): trim/split/add-track must NOT rebuild; move/duplicate/delete/
  * undo/redo still legitimately do.
+ *
+ * Compares a before/after snapshot of the counter `gotoEditor()` installs
+ * (see its doc comment for why this is a snapshot-diff rather than a fresh
+ * attach/detach per call — the latter has a real race against the initial
+ * mount's own rebuild event). **Requires the page to have been navigated via
+ * `gotoEditor()`, not a bare `page.goto("/")`.**
  *
  * Listens for the library's own `window` CustomEvent
  * `"waveform-playlist:ready"` (confirmed in
@@ -83,15 +118,7 @@ type RebuildProbeWindow = {
  * *automated* detector against small synthetic fixtures like these.
  */
 export async function rebuildsEngine(page: Page, action: () => Promise<void>): Promise<boolean> {
-  await page.evaluate(() => {
-    const w = window as unknown as RebuildProbeWindow;
-    w.__rebuildCount = 0;
-    const listener: EventListener = () => {
-      w.__rebuildCount += 1;
-    };
-    window.addEventListener("waveform-playlist:ready", listener);
-    w.__rebuildListener = listener;
-  });
+  const before = await page.evaluate(() => (window as unknown as RebuildProbeWindow).__rebuildCount);
 
   await action();
   await waitForWaveformReady(page);
@@ -99,11 +126,6 @@ export async function rebuildsEngine(page: Page, action: () => Promise<void>): P
   // just after `action`'s own promise resolves.
   await page.waitForTimeout(200);
 
-  return page.evaluate(() => {
-    const w = window as unknown as RebuildProbeWindow;
-    if (w.__rebuildListener) {
-      window.removeEventListener("waveform-playlist:ready", w.__rebuildListener);
-    }
-    return w.__rebuildCount > 0;
-  });
+  const after = await page.evaluate(() => (window as unknown as RebuildProbeWindow).__rebuildCount);
+  return after > before;
 }

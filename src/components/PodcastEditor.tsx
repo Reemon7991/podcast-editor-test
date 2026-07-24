@@ -6,9 +6,8 @@ import { useTimelineTracks } from "../hooks/useTimelineTracks";
 import { useClipActions } from "../hooks/useClipActions";
 
 export function PodcastEditor() {
-  const { tracks, setTracks, addTrack, removeTrack, addFilesToTrack, isLoading } =
-    useTimelineTracks();
-  const { duplicateClip, deleteClip } = useClipActions({ setTracks });
+  const { tracks, addTrack, removeTrack, addFilesToTrack, isLoading } = useTimelineTracks();
+  const { duplicateClip, deleteClip } = useClipActions();
 
   // WaveformPlaylistProvider's onRemoveTrack gives a track *index* (it's a
   // Waveform-level UI callback, not aware of our id-keyed state) — resolve it
@@ -24,8 +23,6 @@ export function PodcastEditor() {
   return (
     <div className="flex w-full flex-col gap-4">
       <TimelineStage
-        tracks={tracks}
-        onTracksChange={setTracks}
         onRemoveTrack={handleRemoveTrackByIndex}
         deferEngineRebuild={isLoading}
         onAddTrack={addTrack}

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { makeSineWavFile } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles } from "./helpers";
+import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./helpers";
 
 /**
  * Phase 0 smoke test (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md) — proves the
@@ -11,7 +11,7 @@ import { SELECTORS, waitForWaveformReady, uploadFiles } from "./helpers";
  */
 test.describe("single-clip playback", () => {
   test("import, play, and zoom", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await waitForWaveformReady(page);
 
     const initialDuration = await page.locator(SELECTORS.totalDuration).textContent();
@@ -49,7 +49,7 @@ test.describe("single-clip playback", () => {
     const pageErrors: Error[] = [];
     page.on("pageerror", (err) => pageErrors.push(err));
 
-    await page.goto("/");
+    await gotoEditor(page);
     await waitForWaveformReady(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
 

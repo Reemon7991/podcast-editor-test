@@ -251,116 +251,157 @@ separate "Upload clip" actions, and confirming both clips resolve to the same
 one record written to IndexedDB for that content hash) — there's no way to assert
 it from the DOM alone before persistence exists.
 
-### Phase 2 — Undo/redo via Zustand (still no persistence)
+### Phase 2 — Undo/redo via Zustand (done)
 
-Zustand store (`audio-engine/persistence/projectStore.ts`):
+**Status: implemented and committed.** The design below is the ORIGINAL sketch,
+kept for the reasoning it documents (the stale-closure rule below is still exactly
+right and still how the shipped store works) — but the shipped store ended up with
+three MORE actions than sketched here, each added to fix a real bug found only once
+undo/redo actually existed to expose it (rendering-only Phase 1 had no way to
+surface these). See CLAUDE.md's "Persistence + Undo/Redo layer" → "Phase 2" for the
+full writeup of all four bugs; summary and the actual final store shape below.
+Files live under `store/`/`hooks/`/`utils/`, not `audio-engine/persistence/` — see
+CLAUDE.md's "Project-wide layer-based restructuring" note (this happened between
+Phase 1 and Phase 2, requested explicitly, not part of this plan originally).
+
+Zustand store (`store/projectStore.ts`) — as shipped:
 ```ts
 interface HistoryEntry { label: string; before: TrackMeta[]; after: TrackMeta[]; }
 interface ProjectStoreState {
   present: TrackMeta[];
   past: HistoryEntry[];
   future: HistoryEntry[];
-  // `update` computes `next` from whatever `present` *actually is* at the moment
-  // this action runs — never from a value the caller captured earlier. See
-  // "Stale-closure rule" below for why this is the signature, not `(next, label)`.
+  lastEngineOutput: { dehydrated: TrackMeta[]; raw: ClipTrack[] } | null; // moved in from TimelineStage.tsx state, see bug #1
+  dragBaseline: TrackMeta[] | null; // new, see bug #4
   commit: (update: (prev: TrackMeta[]) => TrackMeta[], label: string) => void;
+  commitEngineOutput: (raw: ClipTrack[], dehydrated: TrackMeta[]) => void; // new, see bugs #1, #3, #4
+  updateEngineOutputLive: (raw: ClipTrack[], dehydrated: TrackMeta[]) => void; // new, see bug #2
+  beginLiveDrag: () => void; // new, see bug #4
+  cancelLiveDrag: () => void; // new, see bug #4
   undo: () => void;
   redo: () => void;
   replacePresent: (tracks: TrackMeta[]) => void; // non-history-pushing; used by Phase 3's load-on-mount only
 }
 ```
-`commit`/`undo`/`redo`/`replacePresent` must be **fully synchronous** (plain `set()`
-calls, no `await` inside the action) — this codebase has already hit two races from
-a check-then-act split across an `await` (the `play()`/rebuild race, the
-`resumePlayback` race, both in CLAUDE.md); don't introduce a third.
+`commit`/`commitEngineOutput`/`updateEngineOutputLive`/`undo`/`redo`/`replacePresent`
+are all **fully synchronous** (plain `set()` calls, no `await` inside the action) —
+this codebase has already hit two races from a check-then-act split across an
+`await` (the `play()`/rebuild race, the `resumePlayback` race, both in CLAUDE.md);
+don't introduce a third.
 
-**Stale-closure rule (found in review of this plan's first draft, fixed here):**
+**Stale-closure rule (found in review of this plan's first draft, still holds):**
 the first draft had `commit(next: TrackMeta[], label: string)` — a materialized
 array, not a function. That reintroduces exactly the class of bug the "fully
 synchronous" rule above is trying to prevent, just one layer up: `addFilesToTrack`
 is async (decode happens before any commit), so if it closes over a `present` value
 read *before* the `await`, and some other mutation (a drag, another import) commits
 *during* that decode, the eventual `commit(next, ...)` call would silently revert
-it — a real check-then-act split, just spanning a React callback instead of a
-`set()` call. Today's plain `useState`-based `setTracks(prev => ...)` avoids this
-for free via React's functional-update pattern; a plain-array `commit` API throws
-that safety away. Fixed by making `commit` always take an updater function — the
-store applies it to `get().present` *inside* the synchronous `set()` call, so
-`prev` is always whatever's true at the instant the commit actually executes, not
-whatever was true when the caller decided to call it. Every caller uses this form
-now, even ones with no `await` in front of them (e.g. `TimelineStage.tsx`'s
-engine-driven commits become `commit(() => dehydrated, "Edit timeline")`) — one
-signature, no path that can accidentally pass a stale snapshot.
+it. Fixed by making `commit` always take an updater function — the store applies
+it to `get().present` *inside* the synchronous `set()` call, so `prev` is always
+whatever's true at the instant the commit actually executes, not whatever was true
+when the caller decided to call it. Verified by the committed race test in
+`e2e/undoRedo.spec.ts` ("importing clips does not lose a concurrent add-track
+commit").
+
+**Four bugs found while implementing this (full detail in CLAUDE.md):**
+1. `lastEngineOutput` had to move from `TimelineStage.tsx`'s own `useState` into
+   the store, so it updates atomically with `present` in the same `set()` call —
+   kept separately, the two didn't always land in the same render, which was
+   enough to spuriously defeat `isEngineTracks` and trigger an avoidable rebuild.
+2. Trim's live-preview frames (one `onTracksChange` call per pointer-move, from
+   the library's own `useClipDragHandlers`) were each becoming their own
+   undo-able step. Fixed by having `ClipDragLayer.tsx` wrap the `onTracksChange`
+   it feeds into `useClipDragHandlers` with `updateEngineOutputLive` (updates
+   `present` for the live visual, never touches history) — the real commit
+   (`trimClip()` + `commitTransaction()` at drag-end) is a separate call path
+   that still reaches the real, history-pushing `commitEngineOutput` unwrapped.
+3. The incremental-add path's own engine mirror-back (`engine.addTrack()`
+   triggering the engine's "statechange" purely to confirm what was already
+   committed) was pushing a second, content-identical history entry — so one
+   Undo only ever undid that harmless echo, never the real add. Fixed with an
+   order-independent structural-equality check (`utils/deepEqual.ts`) in
+   `commitEngineOutput`: identical-content mirrors update `present`/
+   `lastEngineOutput` (still needed for the passthrough cache) but skip the
+   history push.
+4. Even after fix #2, a trim's single Undo landed on the last live-preview frame,
+   not the true pre-trim state — because `updateEngineOutputLive` continuously
+   overwrites `present` throughout the drag, so by settle time `present` no
+   longer reflects the pre-drag baseline. Fixed with an explicit `dragBaseline`:
+   `ClipDragLayer.tsx`'s `onDragStart` calls `beginLiveDrag()` (captures
+   `present` once, gated on `data?.boundary` so a plain move never sets it),
+   its cancelled-boundary-drag branch calls `cancelLiveDrag()` (clears it if no
+   real commit will ever consume it), and `commitEngineOutput` uses
+   `dragBaseline ?? present` as `before`, then clears it.
 
 New files:
-- `audio-engine/persistence/projectStore.ts` — as above.
-- `audio-engine/persistence/useUndoRedoShortcut.ts` — keydown listener mounted from
-  `EditorShell.tsx` (inside the provider tree). Wires Ctrl/Cmd+Z and
-  Ctrl/Cmd+Shift+Z to `store.undo()`/`store.redo()`, gated on `isReady` (same
-  signal already gating `TransportControls`). **Do not** enable the library's own
-  `undo?: boolean` shortcut prop or call `usePlaylistControls().undo/redo` —
-  confirmed via `@waveform-playlist/browser/dist/index.d.ts` that this is a
-  separate, opt-in mechanism (defaults off, not currently used anywhere in this
-  app) that only covers engine-internal transactions; wiring both would mean two
-  competing Ctrl+Z listeners.
-- `transport/UndoRedoButtons.tsx` — reads `useProjectStore` directly, rendered
-  inside `TransportControls.tsx`. Inherits the existing `pointer-events-none
-  opacity-50` `!isReady` gating for free, since it renders inside the same wrapped
-  block `EditorShell.tsx` already wraps `TransportControls` in.
+- `store/projectStore.ts` — as above.
+- `hooks/useUndoRedoShortcut.ts` — keydown listener mounted from
+  `timeline/EditorShell.tsx` (inside the provider tree, needed for the
+  stop()/isPlaying guard). Wires Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z to
+  `store.undo()`/`store.redo()`, gated on `isReady` (same signal already gating
+  `TransportControls`). **Does not** enable the library's own `undo?: boolean`
+  shortcut prop or call `usePlaylistControls().undo/redo` — confirmed via
+  `@waveform-playlist/browser/dist/index.d.ts` that's a separate, opt-in
+  mechanism (defaults off, not used anywhere in this app) that only covers
+  engine-internal transactions; wiring both would mean two competing Ctrl+Z
+  listeners.
+- `components/transport/UndoRedoButtons.tsx` — reads `useProjectStore` directly,
+  rendered inside `TransportControls.tsx`. Icon buttons (inline SVG, matching
+  `ClipActionsMenu.tsx`'s own hand-rolled-icon pattern), not text labels.
+  Inherits the existing `pointer-events-none opacity-50` `!isReady` gating for
+  free, since it renders inside the same wrapped block `EditorShell.tsx` already
+  wraps `TransportControls` in.
+- `utils/deepEqual.ts` — order-independent structural equality (see bug #3).
 
-**Playback guard extension (confirmed decision):** extend the existing "stop
-playback before a rebuild-triggering mutation" guard (today only in
-`ClipDragLayer.tsx`'s `onDragEnd`) to duplicate/delete and undo/redo — closing a
-real pre-existing gap (duplicate/delete during playback can already hit the
-documented `TonePlayout not initialized` crash today, independent of this work,
-since they already go through a full rebuild via plain `setTracks`).
-- `clip-menu/ClipActionsOverlay.tsx` — pull in `usePlaybackAnimation().isPlaying`
-  and `usePlaylistControls().stop()` (both already used elsewhere in this codebase,
-  e.g. `ClipDragLayer.tsx`); call `stop()` before invoking `onDuplicateClip`/
-  `onDeleteClip` when `isPlaying`. This is the right place for the guard (not
-  `useClipActions.ts` itself) because that hook is owned by `PodcastEditor.tsx`,
-  outside the provider tree, and structurally can't reach `stop()`/`isPlaying` —
-  `ClipActionsOverlay` already lives inside the tree and already calls these props.
+**Playback guard extension:** extended the existing "stop playback before a
+rebuild-triggering mutation" guard (previously only in `ClipDragLayer.tsx`'s
+`onDragEnd`) to duplicate/delete and undo/redo — closed a real pre-existing gap
+(duplicate/delete during playback could already hit the documented `TonePlayout
+not initialized` crash, independent of this work, since they already went
+through a full rebuild via plain state updates).
+- `components/clip-menu/ClipActionsOverlay.tsx` — pulls in
+  `usePlaybackAnimation().isPlaying` and `usePlaylistControls().stop()`; calls
+  `stop()` before invoking `onDuplicateClip`/`onDeleteClip` when `isPlaying`.
 - `useUndoRedoShortcut.ts` / `UndoRedoButtons.tsx` — same `stop()`-if-`isPlaying`
   check before calling `store.undo()`/`redo()` (both the keyboard path and the
   button-click path need it independently).
 
 Modified:
-- `useTimelineTracks.ts` — reads/writes go through `useProjectStore` (`present`,
-  `commit(update, label)`) instead of local `useState`; each action passes a
-  descriptive label ("Add track", "Import clips", etc) and an updater function
-  (`(prev) => next`), never a value captured before an `await`.
-- `useClipActions.ts` — calls `commit((prev) => next, "Duplicate clip"/"Delete clip")`.
-- `timeline/TimelineStage.tsx` — its `onTracksChange` wrapper calls
-  `commit(() => dehydrate(raw), "Edit timeline")` (one generic label — this is the
-  fan-in point for both engine-driven trim/split and `ClipDragLayer`'s hand-applied
-  moves, no cheap way to distinguish which one just happened here, and labels are
-  cosmetic only).
-- `timeline/EditorShell.tsx` — mounts `useUndoRedoShortcut()`.
-- `transport/TransportControls.tsx` — renders `<UndoRedoButtons />`.
+- `hooks/useTimelineTracks.ts` — reads/writes go through `useProjectStore`
+  (`present`, `commit(update, label)`) instead of local `useState`.
+- `hooks/useClipActions.ts` — calls `commit((prev) => next, "Duplicate clip"/
+  "Delete clip")`.
+- `components/timeline/TimelineStage.tsx` — its `onTracksChange` wrapper calls
+  `commitEngineOutput(raw, dehydrate(raw))` unconditionally (it only ever
+  receives *settled* engine-driven updates now — live-preview frames are
+  intercepted earlier, in `ClipDragLayer.tsx`).
+- `components/timeline/EditorShell.tsx` — mounts `useUndoRedoShortcut()`.
+- `components/transport/TransportControls.tsx` — renders `<UndoRedoButtons />`.
+- `components/timeline/ClipDragLayer.tsx` — no longer "zero changes" as Phase 1
+  claimed; wraps `onTracksChange` for `useClipDragHandlers` (bugs #2, #4).
 
-Known, deliberately-deferred edge cases (disclose in CLAUDE.md once implemented,
-don't build around them speculatively):
+Known, deliberately-deferred edge cases (disclosed in CLAUDE.md, not built
+around speculatively):
 - History is capped (~100 entries); older entries silently drop.
-- `future` clears on every `commit()`, including the generic `TimelineStage` bucket.
-- If `undo()`/`redo()` removes the currently-selected track/clip, `EditorShell.tsx`'s
-  `selectedTrackId` may point at a now-missing id — worth a defensive check-and-clear
-  but not a blocker; existing `effectiveTrackId` fallback already handles `null`,
-  just not "stale but non-null".
+- `future` clears on every history-pushing commit.
+- If `undo()`/`redo()` removes the currently-selected track/clip,
+  `EditorShell.tsx`'s `selectedTrackId` may point at a now-missing id — the
+  existing `effectiveTrackId` fallback handles `null`, just not "stale but
+  non-null".
 
-**Verify** (extends the Phase 0 suite): undo/redo through every mutation type;
-confirm `future` clears correctly; confirm buttons/shortcut disable during a
-rebuild; confirm playing → duplicate/delete/undo/redo stops playback rather than
-crashing. Add a specific race test for the stale-closure fix: start an import
-(decode takes nonzero time for a large-enough synthetic file), commit an unrelated
-mutation (e.g. add a track) while the import is still in flight, then confirm both
-end up reflected in `present` once the import resolves — this is the concrete
-scenario the updater-function fix exists for, so it should be the one thing in this
-phase that isn't just "correct by inspection." The two playback-guard races
-(play()/rebuild, and its "editing while already playing" sibling) stay documented
-per CLAUDE.md's existing standard: correct by inspection, not provably safe from an
-automated pass alone, since both were already established as unreproducible under
-Playwright even with throttling.
+**Verify: done, committed** (`e2e/undoRedo.spec.ts`, 9 tests) — undo/redo button
+and keyboard-shortcut enablement; add-track and clip-import undo/redo; redo
+clearing on a new commit after undo; **trim undoing as a single step** (the
+regression bug #4 produced — the one assertion in this phase that isn't just
+"correct by inspection," since it directly reproduces and verifies the fix); the
+stale-closure race; and the playback guard on duplicate and undo. Full suite (18
+tests total: this file, `hydration.spec.ts`, `playback.spec.ts`) passed
+repeatedly against a fresh prod build with no flake observed. The two
+pre-existing playback-guard races (`play()`/rebuild, and its "editing while
+already playing" sibling) stay documented per CLAUDE.md's existing standard:
+correct by inspection, not provably safe from an automated pass alone, since
+both were already established as unreproducible under Playwright even with
+throttling.
 
 ### Phase 3 — IndexedDB persistence + initial-load rehydration
 

@@ -6,6 +6,7 @@ import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
 import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
+import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
 
 interface EditorShellProps {
   onRemoveTrack: (trackIndex: number) => void;
@@ -41,6 +42,10 @@ export function EditorShell({
   // there always sees null after the click.
   const activeTrackIdRef = useRef<string | null>(null);
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
+
+  // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
+  // same isReady signal already gating TransportControls below.
+  useUndoRedoShortcut(isReady);
 
   // Ref updates must happen outside render (React disallows mutating a ref's
   // `.current` during render).

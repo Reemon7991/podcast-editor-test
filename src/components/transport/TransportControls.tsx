@@ -5,6 +5,7 @@ import { PauseButton, ZoomInButton, ZoomOutButton, usePlaylistControls, usePlayb
 import { PlayButton } from "./PlayButton";
 import { PlaybackTime } from "./PlaybackTime";
 import { DurationLabel } from "./DurationLabel";
+import { UndoRedoButtons } from "./UndoRedoButtons";
 
 interface TransportControlsProps {
   /** Threaded through to PlayButton — see its doc comment and
@@ -48,6 +49,12 @@ export function TransportControls({ playPendingRef, onAddFilesToTrack, activeTra
       <div className="flex items-center gap-1.5">
         <PlayButton playPendingRef={playPendingRef} />
         <PauseButton />
+      </div>
+
+      <div className="mx-1 h-5 w-px bg-zinc-300 dark:bg-zinc-700" />
+
+      <div className="flex items-center gap-1.5">
+        <UndoRedoButtons />
       </div>
 
       <div className="mx-1 h-5 w-px bg-zinc-300 dark:bg-zinc-700" />

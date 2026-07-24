@@ -13,6 +13,8 @@ import {
   noDropAnimationPlugins,
 } from "@waveform-playlist/browser";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
+import { dehydrate } from "../../utils/clipHydration";
+import { useProjectStore } from "../../store/projectStore";
 
 interface ClipSourceData {
   trackIndex: number;
@@ -124,13 +126,36 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
   // delta into the sample math at drop time corrects for it.
   const dragStartScrollLeftRef = useRef(0);
 
+  const updateEngineOutputLive = useProjectStore((s) => s.updateEngineOutputLive);
+  const beginLiveDrag = useProjectStore((s) => s.beginLiveDrag);
+  const cancelLiveDrag = useProjectStore((s) => s.cancelLiveDrag);
+
+  // useClipDragHandlers' own onDragMove calls this repeatedly (once per
+  // pointer-move frame) while a boundary (trim) drag is in progress, to
+  // drive the live preview — it never represents a settled state (the
+  // *actual* trim only applies at drag-end, via engine.trimClip() +
+  // commitTransaction(), which mirrors back through the unwrapped
+  // onTracksChange from usePlaylistData() below, a completely separate call
+  // path). Routing these frames through updateEngineOutputLive (present
+  // updates, no undo-history push) instead of the real onTracksChange stops
+  // a single trim gesture from becoming dozens of separately-undoable steps
+  // — confirmed via direct instrumentation that a short trim drag fires this
+  // ten-plus times. See projectStore.ts's own doc comment on
+  // updateEngineOutputLive.
+  const liveOnTracksChange = useCallback(
+    (raw: ClipTrack[]) => {
+      updateEngineOutputLive(raw, dehydrate(raw));
+    },
+    [updateEngineOutputLive]
+  );
+
   const {
     onDragStart: libraryOnDragStart,
     onDragMove,
     onDragEnd: libraryOnDragEnd,
   } = useClipDragHandlers({
     tracks,
-    onTracksChange: onTracksChange ?? (() => {}),
+    onTracksChange: liveOnTracksChange,
     samplesPerPixel,
     engineRef: playoutRef,
     isDraggingRef,
@@ -140,12 +165,22 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
     (event: DragStartEventArg) => {
       dragStartScrollLeftRef.current = scrollContainerRef.current?.scrollLeft ?? 0;
       const data = event.operation?.source?.data as ClipSourceData | undefined;
+      // Boundary (trim) drags are about to start feeding live-preview frames
+      // through liveOnTracksChange/updateEngineOutputLive, which would
+      // otherwise overwrite `present` before the drag settles — capture the
+      // true pre-drag baseline now, once, for commitEngineOutput to use as
+      // the undo entry's `before`. See projectStore.ts's dragBaseline doc
+      // comment. Gated on data?.boundary so a plain clip move (which never
+      // touches updateEngineOutputLive at all) never sets this.
+      if (data?.boundary) {
+        beginLiveDrag();
+      }
       if (data && tracks[data.trackIndex]) {
         setSelectedTrackId(tracks[data.trackIndex].id);
       }
       (libraryOnDragStart as LibraryDragHandler)(event as never);
     },
-    [libraryOnDragStart, tracks, setSelectedTrackId, scrollContainerRef]
+    [libraryOnDragStart, tracks, setSelectedTrackId, scrollContainerRef, beginLiveDrag]
   );
 
   const onDragEnd = useCallback(
@@ -156,6 +191,13 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       // landing while a play() call is mid-await on engine.init() is treated
       // the same way — see the playPendingRef doc comment on this component.
       if (event.canceled || !data || data.boundary || playPendingRef.current) {
+        // A cancelled boundary drag reverts via liveOnTracksChange (never a
+        // real commitEngineOutput call), so the baseline beginLiveDrag()
+        // captured above would otherwise never get cleared and could
+        // corrupt the *next* drag's undo entry.
+        if (data?.boundary && event.canceled) {
+          cancelLiveDrag();
+        }
         (libraryOnDragEnd as LibraryDragHandler)(event as never);
         return;
       }
@@ -241,6 +283,7 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       isPlaying,
       stop,
       libraryOnDragEnd,
+      cancelLiveDrag,
     ]
   );
 

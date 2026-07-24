@@ -5,11 +5,9 @@ import { WaveformPlaylistProvider, type ClipTrack } from "@waveform-playlist/bro
 import { EditorShell } from "./EditorShell";
 import { TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
 import { dehydrate, hydrate } from "../../utils/clipHydration";
-import type { TrackMeta } from "../../utils/types";
+import { useProjectStore } from "../../store/projectStore";
 
 interface TimelineStageProps {
-  tracks: TrackMeta[];
-  onTracksChange: (tracks: TrackMeta[]) => void;
   onRemoveTrack: (trackIndex: number) => void;
   /** True while any clip is still decoding — defers the (expensive) Tone.js
    *  engine rebuild until the whole import batch settles, so adding several
@@ -21,29 +19,7 @@ interface TimelineStageProps {
   onDeleteClip: (trackId: string, clipId: string) => void;
 }
 
-/** Engine-driven commit (trim/split, or ClipDragLayer's hand-applied moves)
- *  the provider itself last produced, kept alongside its dehydrated form so
- *  the *next* render can recognize "this is the same commit coming back
- *  around" and hand the engine its own array reference back unchanged,
- *  instead of paying for a fresh hydrate() that would defeat the provider's
- *  own `tracks === engineTracksRef.current` rebuild-avoidance check. See
- *  PERSISTENCE_UNDO_ORIGINAL_PLAN.md's "Confirmed library behavior" section.
- *
- *  Deliberately component state, not a ref: this project's ESLint config
- *  (eslint-plugin-react-hooks' `refs` rule) rejects reading `ref.current`
- *  during render at all, not just writing it — state is the idiomatic
- *  substitute for a value that's both written from an event/effect callback
- *  and read during render. `handleTracksChange` below sets this in the same
- *  synchronous tick as the `onTracksChange` call that updates the parent's
- *  own `tracks` state, so both batch into one re-render, not two. */
-interface EngineOutputCache {
-  dehydrated: TrackMeta[];
-  raw: ClipTrack[];
-}
-
 export function TimelineStage({
-  tracks,
-  onTracksChange,
   onRemoveTrack,
   deferEngineRebuild,
   onAddTrack,
@@ -52,22 +28,34 @@ export function TimelineStage({
   onDeleteClip,
 }: TimelineStageProps) {
   const [providerError, setProviderError] = useState<string | null>(null);
-  const [lastEngineOutput, setLastEngineOutput] = useState<EngineOutputCache | null>(null);
+  const tracks = useProjectStore((s) => s.present);
+  const lastEngineOutput = useProjectStore((s) => s.lastEngineOutput);
+  const commitEngineOutput = useProjectStore((s) => s.commitEngineOutput);
 
+  // The passthrough cache (lastEngineOutput) lives in the project store, not
+  // component state here — see projectStore.ts's own doc comment on
+  // EngineOutputCache for why colocating it with `present` in one atomic
+  // store update is load-bearing, not just tidiness.
   const hydratedTracks =
     lastEngineOutput?.dehydrated === tracks ? lastEngineOutput.raw : hydrate(tracks);
 
   // The sole choke point between the app's persisted/undo-safe TrackMeta[]
   // state and the hydrated ClipTrack[] shape WaveformPlaylistProvider needs
   // — see clipHydration.ts's own doc comment for why every other component
-  // under this provider is unaffected by that split.
+  // under this provider is unaffected by that split. This callback only ever
+  // receives *settled* engine-driven updates (trim/split's actual commit,
+  // ClipDragLayer's hand-applied moves, the incremental-add mirror) — live
+  // trim-preview frames are intercepted earlier, in ClipDragLayer.tsx (see
+  // its own doc comment), so every call here is safe to push to undo history
+  // under one generic "Edit timeline" label — this is the fan-in point for
+  // several distinct mutation kinds, no cheap way to distinguish which one
+  // just happened here, and labels are cosmetic only (see
+  // PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 2).
   const handleTracksChange = useCallback(
     (raw: ClipTrack[]) => {
-      const dehydrated = dehydrate(raw);
-      setLastEngineOutput({ dehydrated, raw });
-      onTracksChange(dehydrated);
+      commitEngineOutput(raw, dehydrate(raw));
     },
-    [onTracksChange]
+    [commitEngineOutput]
   );
 
   if (providerError) {

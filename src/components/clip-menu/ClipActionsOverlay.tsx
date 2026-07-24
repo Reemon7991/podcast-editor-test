@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { usePlaylistControls, usePlaylistData, useClipSplitting } from "@waveform-playlist/browser";
+import {
+  usePlaybackAnimation,
+  usePlaylistControls,
+  usePlaylistData,
+  useClipSplitting,
+} from "@waveform-playlist/browser";
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
 import { resolveClipAt, clipPixelWidth } from "../../utils/clipGeometry";
@@ -67,7 +72,8 @@ interface ClipActionsOverlayProps {
 export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipActionsOverlayProps) {
   const { tracks, samplesPerPixel, timeScaleHeight, sampleRate, isReady, isDraggingRef, playoutRef } =
     usePlaylistData();
-  const { scrollContainerRef } = usePlaylistControls();
+  const { scrollContainerRef, stop } = usePlaylistControls();
+  const { isPlaying } = usePlaybackAnimation();
   const { splitClipAt } = useClipSplitting({ tracks, samplesPerPixel, engineRef: playoutRef });
 
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
@@ -214,6 +220,14 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipAction
       id: "duplicate",
       label: "Duplicate",
       onSelect: () => {
+        // Duplicate/delete both go through a full engine rebuild (plain
+        // commit, no engine.moveClip()-style transaction) — same
+        // playing-while-editing race as ClipDragLayer's onDragEnd, closed
+        // the same way: stop() is synchronous, so it batches into the same
+        // commit as onDuplicateClip's own state update. See CLAUDE.md's
+        // "editing while already playing" section and
+        // PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 2.
+        if (isPlaying) stop();
         onDuplicateClip(activeTrack.id, activeClip.id);
         closeAndReset();
       },
@@ -223,6 +237,7 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipAction
       label: "Delete",
       destructive: true,
       onSelect: () => {
+        if (isPlaying) stop();
         onDeleteClip(activeTrack.id, activeClip.id);
         closeAndReset();
       },

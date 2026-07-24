@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { makeSineWavFile } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles, rebuildsEngine } from "./helpers";
+import { SELECTORS, waitForWaveformReady, uploadFiles, rebuildsEngine, gotoEditor } from "./helpers";
 
 /**
  * Phase 1 (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md) sits hydrate()/dehydrate()
@@ -14,7 +14,7 @@ import { SELECTORS, waitForWaveformReady, uploadFiles, rebuildsEngine } from "./
  */
 test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   test("adding a track does not rebuild the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await waitForWaveformReady(page);
 
     const rebuilt = await rebuildsEngine(page, async () => {
@@ -25,7 +25,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("duplicating a clip rebuilds the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
 
     const clip = page.locator(SELECTORS.draggableClip).first();
@@ -41,7 +41,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("deleting a clip rebuilds the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
 
     const clip = page.locator(SELECTORS.draggableClip).first();
@@ -57,7 +57,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("splitting a clip does not rebuild the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 4)]);
 
     const clip = page.locator(SELECTORS.draggableClip).first();
@@ -77,7 +77,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("dragging a clip along its track rebuilds the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
 
     const clip = page.locator(SELECTORS.draggableClip).first();
@@ -105,7 +105,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("dragging a clip to another track rebuilds the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
     await page.getByRole("button", { name: "+ New Track" }).click();
     await waitForWaveformReady(page);
@@ -136,7 +136,7 @@ test.describe("Phase 1 hydration boundary — rebuild avoidance", () => {
   });
 
   test("trimming a clip does not rebuild the engine", async ({ page }) => {
-    await page.goto("/");
+    await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 4)]);
 
     const rightHandle = page.locator('[data-boundary-edge="right"]').first();

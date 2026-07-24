@@ -11,7 +11,7 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open (export; undo/redo and persistence are in
+the concrete gaps still open (export; undo/redo is done and persistence is in
 progress — see "Persistence + Undo/Redo layer" below — including a committed
 test suite, though so far scoped to that layer, not the rest of the app).
 Every non-obvious decision below exists because of something concretely
@@ -57,9 +57,9 @@ those two; the AI features are the most speculative and probably last).
    already exposes `undo`/`redo`/`canUndo`/`canRedo` (confirmed in
    `@waveform-playlist/browser`'s public `.d.ts`), but those only cover
    engine-driven transactions, which is why this needs its own command/history
-   layer independent of the library's internal one. **In progress, not done
-   yet** — see "Persistence + Undo/Redo layer" below for current status and
-   the actual design (superseded the sketch this bullet used to contain).
+   layer independent of the library's internal one. **Done** — see
+   "Persistence + Undo/Redo layer" below for the actual design (superseded
+   the sketch this bullet used to contain) and the real bugs found building it.
 3. **Export** — render the mixdown (all tracks/clips/gains) to an audio file
    the user can download. Currently the editor can only play back in-browser;
    there's no way to get audio out of it at all.
@@ -147,7 +147,7 @@ everything else (JSX components) stayed under `components/`, just one level
 shallower — no more `podcast-editor/` wrapper, since the whole project is the
 podcast editor.
 
-## Persistence + Undo/Redo layer (in progress)
+## Persistence + Undo/Redo layer (undo/redo done, persistence in progress)
 
 Full design: `PERSISTENCE_UNDO_ORIGINAL_PLAN.md` — written, reviewed against
 this codebase's actual state (including a verification pass against the
@@ -218,7 +218,80 @@ same-track drag, and cross-track drag **do** — every case the plan called
 out. Full suite (9 tests total, this file plus `playback.spec.ts`) passed
 repeatedly against a fresh prod build with no flake observed.
 
-### Phase 2 — Undo/redo via Zustand (not started)
+### Phase 2 — Undo/redo via Zustand (done)
+
+`store/projectStore.ts` — `present`/`past`/`future`, plus `commit(update, label)`
+for direct app-level mutations (add/remove track, duplicate, delete, import).
+`hooks/useUndoRedoShortcut.ts` (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, mounted from
+`EditorShell.tsx`) and `components/transport/UndoRedoButtons.tsx` (icon
+buttons, not text — inline SVG matching `ClipActionsMenu.tsx`'s own
+hand-rolled-icon pattern) both read the store directly. `useTimelineTracks.ts`/
+`useClipActions.ts` now commit through the store instead of local `useState`.
+`ClipActionsOverlay.tsx` gained the same `stop()`-if-`isPlaying` guard
+`ClipDragLayer.tsx` already had, extended to duplicate/delete/undo/redo (a
+real, pre-existing gap: those already forced a full rebuild via plain state
+updates, so they could already hit the documented `TonePlayout not
+initialized` crash during playback, independent of this phase).
+
+Four real bugs found and fixed while building this — undo/redo turned out to
+be a much better forcing function for surfacing engine-integration edge cases
+than persistence-free rendering ever was, since every one of these was
+invisible until something needed to *replay* history correctly, not just
+render the current state:
+
+- **The Phase 1 passthrough cache (`lastEngineOutput`) needed to move from
+  `TimelineStage.tsx`'s `useState` into the store itself.** Keeping it as
+  separate React state alongside the store's `present` update meant the two
+  didn't always land in the same render (confirmed via direct
+  instrumentation) — one extra render per commit saw the new `present` but
+  the stale `lastEngineOutput`, which was enough to defeat
+  `isEngineTracks` and trigger an avoidable full rebuild. Colocating both in
+  one atomic `set()` call (`commitEngineOutput`) removed the gap entirely.
+- **Trim's live-preview frames were flooding undo history.** Confirmed via
+  direct instrumentation: `useClipDragHandlers`'s own `onDragMove` (used
+  internally by `ClipDragLayer.tsx` for boundary/trim drags) calls
+  `onTracksChange` on *every pointer-move frame* to drive the visual
+  preview — a short trim drag fired it 10+ times, each becoming its own
+  undo-able step. Fixed by having `ClipDragLayer.tsx` wrap the `onTracksChange`
+  it passes into `useClipDragHandlers` with a version that routes to a new
+  `updateEngineOutputLive` store action (updates `present` for the visual,
+  never touches history) — the engine's *actual* commit (`trimClip()` +
+  `commitTransaction()` at drag-end) is a completely separate call path that
+  still reaches the real, history-pushing `commitEngineOutput` unwrapped.
+- **The incremental-add path's own engine mirror-back was pushing a second,
+  spurious history entry.** `useTimelineTracks.addTrack()`'s `commit()` call
+  is one real edit, but `engine.addTrack()` (called internally by the
+  provider's `isIncrementalAdd` path) triggers the engine's own "statechange"
+  mirror-back purely to confirm what was already committed — which, before
+  this fix, silently pushed a second "Edit timeline" entry with the same
+  content. A single Undo only ever undid that harmless echo, never the actual
+  add. Fixed with a structural-equality check (`utils/deepEqual.ts`, order-
+  independent — needed since the engine's own object graph and the app's
+  never match by reference) in `commitEngineOutput`: content-identical
+  mirrors update `present`/`lastEngineOutput` (still needed for the
+  passthrough cache) but skip the history push.
+- **Even after the above, a trim's single Undo landed on the last
+  live-preview frame, not the true pre-trim state.** Root cause:
+  `updateEngineOutputLive` (the previous fix) continuously overwrites
+  `present` throughout the drag so the waveform tracks it live — so by the
+  time the drag settles, `present` already reflects something visually
+  indistinguishable from the final trim, and using it as the undo entry's
+  `before` undoes almost nothing. Fixed with an explicit `dragBaseline`
+  field: `ClipDragLayer.tsx`'s `onDragStart` calls `beginLiveDrag()` (captures
+  `present` once, gated on `data?.boundary` so a plain clip move never sets
+  it) and `onDragEnd`'s cancelled-boundary-drag branch calls `cancelLiveDrag()`
+  (clears it if the drag never reaches a real commit); `commitEngineOutput`
+  uses `dragBaseline ?? present` as `before`, then clears it.
+
+Committed coverage (`e2e/undoRedo.spec.ts`, 9 tests): undo/redo button and
+keyboard-shortcut enablement, add-track and clip-import undo/redo, redo
+clearing on a new commit after undo, trim undoing as one step (the exact
+regression the fourth bug above produced), a stale-closure race regression
+(an unrelated commit landing while an import's decode is still in flight must
+survive, not get silently reverted — see `commit`'s own doc comment), and the
+playback guard on duplicate and undo. Full suite (18 tests: this file,
+`hydration.spec.ts`, `playback.spec.ts`) passed repeatedly against a fresh
+prod build with no flake observed.
 
 ### Phase 3 — IndexedDB persistence + initial-load rehydration (not started)
 

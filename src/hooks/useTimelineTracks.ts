@@ -3,48 +3,33 @@
 import { useCallback, useState } from "react";
 import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
-import type { ClipMeta, TrackMeta } from "../utils/types";
-
-function createEmptyTrack(index: number): TrackMeta {
-  return {
-    id: crypto.randomUUID(),
-    name: `Track ${index}`,
-    clips: [],
-    muted: false,
-    soloed: false,
-    volume: 1,
-    pan: 0,
-  };
-}
+import type { ClipMeta } from "../utils/types";
+import { createEmptyTrack, useProjectStore } from "../store/projectStore";
 
 /**
- * Owns the multi-track timeline as persisted state (not a value recomputed
- * from scratch each render). This matters once clips can be dragged: a pure
- * "recompute positions from an import list" approach — the previous
- * single-track design — would silently discard any manual drag the moment
- * something else (a new import, a gap change) triggered a recompute.
- *
- * Track/clip identity is stable across renders. State here is `TrackMeta[]`
- * (metadata only, no decoded audio) — TimelineStage.tsx is the sole
- * boundary that joins it with real audio via hydrate()/dehydrate() before
- * it reaches WaveformPlaylistProvider; see
- * audio-engine/persistence/clipHydration.ts and
- * PERSISTENCE_UNDO_ORIGINAL_PLAN.md's "Core mechanism" section for why, and
- * for how engine-driven moves (same-track drag) still get to feed back into
- * this same state via reference-identity rebuild-skipping despite that
- * boundary sitting in between.
+ * Track/clip identity is stable across renders. State (`present`) lives in
+ * the Zustand project store, not local component state — every mutation
+ * goes through `commit(update, label)` so it's undo/redo-able (see
+ * store/projectStore.ts and PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 2).
+ * `TimelineStage.tsx` is the sole boundary that joins `present` (`TrackMeta[]`,
+ * metadata only, no decoded audio) with real audio via hydrate()/dehydrate()
+ * before it reaches WaveformPlaylistProvider.
  */
 export function useTimelineTracks() {
-  const [tracks, setTracks] = useState<TrackMeta[]>(() => [createEmptyTrack(1)]);
+  const tracks = useProjectStore((s) => s.present);
+  const commit = useProjectStore((s) => s.commit);
   const [loadingCount, setLoadingCount] = useState(0);
 
   const addTrack = useCallback(() => {
-    setTracks((prev) => [...prev, createEmptyTrack(prev.length + 1)]);
-  }, []);
+    commit((prev) => [...prev, createEmptyTrack(prev.length + 1)], "Add track");
+  }, [commit]);
 
-  const removeTrack = useCallback((trackId: string) => {
-    setTracks((prev) => prev.filter((t) => t.id !== trackId));
-  }, []);
+  const removeTrack = useCallback(
+    (trackId: string) => {
+      commit((prev) => prev.filter((t) => t.id !== trackId), "Remove track");
+    },
+    [commit]
+  );
 
   /**
    * Decodes every file in the batch concurrently (fast), but only commits
@@ -54,6 +39,13 @@ export function useTimelineTracks() {
    * one selected before it, since decode completion order isn't the same as
    * selection order. Positioning is computed once at commit time — it does
    * NOT re-lay-out clips the user has since dragged elsewhere on the track.
+   *
+   * `commit`'s updater reads `prev` from the store at the moment this
+   * eventually runs (after the `await`s below), not a `tracks` value closed
+   * over at call time — critical here specifically, since this is the one
+   * mutation in this app with a real async gap between "user action" and
+   * "commit": another commit (a drag, another import) landing during decode
+   * must not be silently reverted. See projectStore.ts's `commit` doc comment.
    */
   const addFilesToTrack = useCallback(
     (trackId: string, files: File[], insertionTimeSeconds: number) => {
@@ -76,52 +68,53 @@ export function useTimelineTracks() {
           })
         );
 
-        setTracks((prev) =>
-          prev.map((track) => {
-            if (track.id !== trackId) return track;
-            let cursor = 0;
-            let cursorInitialized = false;
-            const appended: ClipMeta[] = [];
-            for (const result of results) {
-              if (result.status === "rejected") {
-                console.error(
-                  "[podcast-editor] Failed to decode file",
-                  result.reason
-                );
-                continue;
+        commit(
+          (prev) =>
+            prev.map((track) => {
+              if (track.id !== trackId) return track;
+              let cursor = 0;
+              let cursorInitialized = false;
+              const appended: ClipMeta[] = [];
+              for (const result of results) {
+                if (result.status === "rejected") {
+                  console.error(
+                    "[podcast-editor] Failed to decode file",
+                    result.reason
+                  );
+                  continue;
+                }
+                const { file, audioBuffer, assetId } = result.value;
+                if (!cursorInitialized) {
+                  cursor = Math.round(insertionTimeSeconds * audioBuffer.sampleRate);
+                  cursorInitialized = true;
+                }
+                const startSample: number = cursor;
+                appended.push({
+                  id: crypto.randomUUID(),
+                  assetId,
+                  startSample,
+                  durationSamples: audioBuffer.length,
+                  offsetSamples: 0,
+                  sampleRate: audioBuffer.sampleRate,
+                  sourceDurationSamples: audioBuffer.length,
+                  gain: 1,
+                  name: file.name.replace(/\.[^/.]+$/, ""),
+                });
+                cursor = startSample + audioBuffer.length;
               }
-              const { file, audioBuffer, assetId } = result.value;
-              if (!cursorInitialized) {
-                cursor = Math.round(insertionTimeSeconds * audioBuffer.sampleRate);
-                cursorInitialized = true;
-              }
-              const startSample: number = cursor;
-              appended.push({
-                id: crypto.randomUUID(),
-                assetId,
-                startSample,
-                durationSamples: audioBuffer.length,
-                offsetSamples: 0,
-                sampleRate: audioBuffer.sampleRate,
-                sourceDurationSamples: audioBuffer.length,
-                gain: 1,
-                name: file.name.replace(/\.[^/.]+$/, ""),
-              });
-              cursor = startSample + audioBuffer.length;
-            }
-            return { ...track, clips: [...track.clips, ...appended] };
-          })
+              return { ...track, clips: [...track.clips, ...appended] };
+            }),
+          "Import clips"
         );
 
         setLoadingCount((c) => c - files.length);
       })();
     },
-    []
+    [commit]
   );
 
   return {
     tracks,
-    setTracks,
     addTrack,
     removeTrack,
     addFilesToTrack,
