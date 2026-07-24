@@ -11,10 +11,12 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open (persistence, export, a committed test suite,
-undo/redo). Every non-obvious decision below exists because of something
-concretely discovered while building this, not speculation — treat this file
-as the fastest way to avoid re-deriving that work in a future session.
+the concrete gaps still open (export; undo/redo and persistence are in
+progress — see "Persistence + Undo/Redo layer" below — including a committed
+test suite, though so far scoped to that layer, not the rest of the app).
+Every non-obvious decision below exists because of something concretely
+discovered while building this, not speculation — treat this file as the
+fastest way to avoid re-deriving that work in a future session.
 
 ## Current feature state
 
@@ -48,11 +50,16 @@ makes sense to build on top of; split/fades and effects are independent of
 those two; the AI features are the most speculative and probably last).
 
 1. **Persistence** — project state (tracks/clips, decoded audio) survives
-   a reload. Nothing currently does; all state lives in React state only.
+   a reload. **In progress, not done yet** — see "Persistence + Undo/Redo
+   layer" below for current status; don't treat this bullet as current truth,
+   it's only kept here for the ordering rationale in the paragraph above.
 2. **Undo/redo** — the library's own `WaveformPlaylistProvider` context
    already exposes `undo`/`redo`/`canUndo`/`canRedo` (confirmed in
    `@waveform-playlist/browser`'s public `.d.ts`), but those only cover
-   engine-driven transactions. This needs command/history layer (reducer/command-pattern store) so that every mutation — add/remove track, import clips, move/trim/reorder a clip — becomes an explicit command with a do/undo pair, tracked in our own application state, independent of the library's internal (and only partially applicable) undo system.
+   engine-driven transactions, which is why this needs its own command/history
+   layer independent of the library's internal one. **In progress, not done
+   yet** — see "Persistence + Undo/Redo layer" below for current status and
+   the actual design (superseded the sketch this bullet used to contain).
 3. **Export** — render the mixdown (all tracks/clips/gains) to an audio file
    the user can download. Currently the editor can only play back in-browser;
    there's no way to get audio out of it at all.
@@ -103,6 +110,81 @@ owns playback controls/time display and file intake. Cross-folder imports are
 relative (`../transport/TransportControls`); same-folder imports stay `./`.
 Every file under `components/podcast-editor/` is `"use client"`. Nothing
 outside this folder needs to change to extend the feature set further.
+
+## Persistence + Undo/Redo layer (in progress)
+
+Full design: `PERSISTENCE_UNDO_ORIGINAL_PLAN.md` — written, reviewed against
+this codebase's actual state (including a verification pass against the
+installed `@waveform-playlist` dist source), and refined before any of the
+phases below started; not a speculative design doc. Current branch:
+`persistence-undo/redo-layer-2`. **Update this section after every phase
+completes** — this file's whole value is not needing to re-derive what's
+already been figured out, so don't let it drift behind the plan doc or the
+actual code the way other sections of this file have occasionally been caught
+out of date (see the `patch-package` correction in "Current feature state").
+
+### Phase 0 — Committed test harness (done)
+
+Replaced this project's prior ad-hoc-Playwright-script-per-session pattern
+(see "Verification approach" below, now partially superseded for this layer)
+with a real committed suite: `@playwright/test`, `playwright.config.ts` (runs
+`npm run build && npm run start` — same prod-build-only rule as before),
+`e2e/fixtures.ts` (synthetic WAV generation, promoted from a scratchpad
+script), `e2e/helpers.ts`, `e2e/playback.spec.ts`. `npm run test:e2e` runs it.
+
+### Phase 1 — Metadata/hydration boundary (done)
+
+New `audio-engine/persistence/` subfolder: `types.ts` (`ClipMeta`/`TrackMeta`
+— `AudioClip`/`ClipTrack` minus `audioBuffer`, plus a content-hash `assetId`),
+`assetRegistry.ts` (buffer↔assetId lookup table — `assetId` is minted from
+`SHA-256(file bytes)`, not a random UUID, so two independent uploads of
+identical bytes dedupe for free once persistence exists), `clipHydration.ts`
+(`hydrate`/`dehydrate` plus a per-track memoization cache). `TimelineStage.tsx`
+is now the sole choke point between app state (`TrackMeta[]`) and the
+hydrated `ClipTrack[]` shape `WaveformPlaylistProvider` actually needs.
+
+Two things found while building this, worth not re-discovering:
+
+- **`eslint-plugin-react-hooks`'s `refs` rule rejects reading `ref.current`
+  during render, not just writing it.** This project's ESLint config
+  (bleeding-edge Next.js/React, see AGENTS.md) enables it. The passthrough
+  cache `TimelineStage.tsx` needs — to preserve `WaveformPlaylistProvider`'s
+  `tracks === engineTracksRef.current` rebuild-avoidance check across the new
+  `hydrate()` boundary — was originally designed around a ref; it has to be
+  `useState` instead, since state is the idiomatic substitute for a value
+  written from an event/effect callback and read during render. Confirmed
+  this doesn't cost an extra render: the state setter and the parent's own
+  `setTracks` both fire synchronously in the same callback tick, so React
+  batches them into one commit.
+- **The "Building waveform…" placeholder is not a reliable *automated* signal
+  for "did a full engine rebuild happen."** It's a fine signal for a human
+  watching a real, slow rebuild (large session, cold module cache) — that's
+  what the play()/rebuild-race sections below already lean on. But for a
+  small synthetic test clip over an already-warm dynamic-import cache (true
+  for every rebuild after the first one on a given page load), the engine's
+  `resolvePlayoutAdapter()` resolves via a microtask fast enough that React
+  can batch the `isReady` false→true transition without ever committing an
+  observably separate "not ready" DOM state — confirmed empirically (a
+  MutationObserver watching for the placeholder text never fired across a
+  rebuild that other evidence confirmed did happen). The reliable signal is
+  the library's own `window` CustomEvent `"waveform-playlist:ready"`
+  (confirmed in `@waveform-playlist/browser/dist/index.js` — dispatched
+  exactly once, at the end of the full-rebuild `loadAudio()` path, never on
+  the `isEngineTracks`/`isIncrementalAdd` skip-rebuild paths, which return
+  early before reaching it). `e2e/helpers.ts`'s `rebuildsEngine()` listens for
+  this instead.
+
+Committed coverage (`e2e/hydration.spec.ts`, 7 tests, real `page.mouse`
+pointer-drag sequences for drag/trim — not `locator.dragTo()`, which emulates
+HTML5 DnD, a different mechanism than dnd-kit's `PointerSensor`): confirms
+add-track, split, and boundary trim do **not** rebuild; duplicate, delete,
+same-track drag, and cross-track drag **do** — every case the plan called
+out. Full suite (9 tests total, this file plus `playback.spec.ts`) passed
+repeatedly against a fresh prod build with no flake observed.
+
+### Phase 2 — Undo/redo via Zustand (not started)
+
+### Phase 3 — IndexedDB persistence + initial-load rehydration (not started)
 
 ## Critical setup gotchas (do not re-discover these)
 
@@ -366,6 +448,11 @@ fix reverted (reliably reproduces both the mid-drag warning and the
 permanently-disabled Play button afterward).
 
 ## Verification approach (no permanent test suite)
+
+**Partially superseded**: the persistence/undo-redo layer now has a real
+committed Playwright suite (`e2e/`, `npm run test:e2e`) — see "Persistence +
+Undo/Redo layer" above. Everything else in this section still applies to the
+rest of the app, which doesn't have committed coverage yet.
 
 There is no Playwright/Jest setup committed to this repo. All verification
 so far has been done via **ad-hoc scripts in the session scratchpad**

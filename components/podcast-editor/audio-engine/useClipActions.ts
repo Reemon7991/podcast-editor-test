@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, type Dispatch, type SetStateAction } from "react";
-import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
+import type { ClipMeta, TrackMeta } from "./persistence/types";
 
 interface UseClipActionsOptions {
-  setTracks: Dispatch<SetStateAction<ClipTrack[]>>;
+  setTracks: Dispatch<SetStateAction<TrackMeta[]>>;
 }
 
 /**
@@ -31,7 +31,7 @@ export function useClipActions({ setTracks }: UseClipActionsOptions) {
           if (track.id !== trackId) return track;
           const clip = track.clips.find((c) => c.id === clipId);
           if (!clip) return track;
-          const duplicate: AudioClip = {
+          const duplicate: ClipMeta = {
             ...clip,
             id: crypto.randomUUID(),
             startSample: clip.startSample + clip.durationSamples,

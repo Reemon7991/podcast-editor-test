@@ -33,7 +33,7 @@ project's prior ad-hoc-Playwright-script-per-session pattern.
 ## Core mechanism: metadata/binary split
 
 ```ts
-// audio-engine/types.ts
+// audio-engine/persistence/types.ts
 type ClipMeta = Omit<AudioClip, "audioBuffer"> & { assetId: string };
 type TrackMeta = Omit<ClipTrack, "clips"> & { clips: ClipMeta[] };
 ```
@@ -46,7 +46,7 @@ flow this app doesn't use — nothing here ever sets it, so there's nothing to s
 The real `ClipTrack[]` (audioBuffer inline — the "hydrated" form) is a derived,
 ephemeral view that exists only as the `tracks` prop fed to `WaveformPlaylistProvider`.
 
-**Asset registry** (`audio-engine/assetRegistry.ts`) — module-level, never part of
+**Asset registry** (`audio-engine/persistence/assetRegistry.ts`) — module-level, never part of
 React/Zustand state:
 ```ts
 const buffersById = new Map<string, AudioBuffer>();
@@ -87,7 +87,7 @@ copy) — some engines' Web Audio implementations have historically neutered
 (detached) the buffer passed to `decodeAudioData`. Hashing first side-steps the
 question entirely rather than relying on current spec behavior holding.
 
-**Boundary functions** (`audio-engine/clipHydration.ts`):
+**Boundary functions** (`audio-engine/persistence/clipHydration.ts`):
 - `hydrate(tracks: TrackMeta[]): ClipTrack[]` — joins metadata + registry.
 - `dehydrate(tracks: ClipTrack[]): TrackMeta[]` — strips buffers, resolves `assetId`.
 
@@ -119,13 +119,19 @@ slow-for-large-sessions path already documented for clip moves).
 complementary caches:
 
 1. **Whole-array passthrough cache**, in `TimelineStage.tsx`: when `onTracksChange(raw)`
-   fires, stash `{ dehydrated: dehydrate(raw), raw }` in a ref. When computing the
-   `tracks` prop, if the current `present` (from the store) is reference-equal to
-   `lastEngineOutputRef.current.dehydrated`, return `lastEngineOutputRef.current.raw`
-   unchanged instead of calling `hydrate()` — restores `isEngineTracks` for the exact
-   render caused by that engine-driven commit. Falls through to `hydrate()` for any
-   other commit (move, duplicate, delete, add/remove track, undo/redo), correctly, with
-   no manual invalidation needed (the reference just won't match).
+   fires, stash `{ dehydrated: dehydrate(raw), raw }` in **component state** (a
+   `useState`, not a ref — this project's ESLint config, on this bleeding-edge
+   React/Next setup, enables `eslint-plugin-react-hooks`' `refs` rule, which rejects
+   reading `ref.current` during render at all, not just writing it; state is the
+   idiomatic substitute for a value written from an event/effect callback and read
+   during render — found and fixed during Phase 1's implementation, see
+   `TimelineStage.tsx`'s own doc comment). When computing the `tracks` prop, if the
+   current `tracks` prop is reference-equal to the cached `dehydrated` value, return
+   the cached `raw` value unchanged instead of calling `hydrate()` — restores
+   `isEngineTracks` for the exact render caused by that engine-driven commit. Falls
+   through to `hydrate()` for any other commit (move, duplicate, delete, add/remove
+   track, undo/redo), correctly, with no manual invalidation needed (the reference
+   just won't match).
 2. **Per-track memoized `hydrate()`**: `WeakMap<TrackMeta-track-object, ClipTrack>` —
    only rebuilds a track's hydrated form when that specific track object's reference
    changed. Restores `isIncrementalAdd`'s per-track check for `addTrack`
@@ -133,10 +139,27 @@ complementary caches:
    same benefit to `duplicateClip`/`deleteClip` (which already only replace the one
    affected track's object via `.map()`, per `useClipActions.ts`'s current code).
 
-Verify in Phase 1 specifically: trim, split, and add-track should **not** flash
-"Building waveform…"; cross-track/same-track move, duplicate, delete, undo, redo
-still legitimately should (matches today's behavior for moves, extends it — by
-design — to the other two).
+Verify in Phase 1 specifically: trim, split, and add-track should **not** trigger a
+full engine rebuild; cross-track/same-track move, duplicate, delete, undo, redo still
+legitimately should (matches today's behavior for moves, extends it — by design — to
+the other two).
+
+**Automated-detection gotcha found while building this (see `e2e/helpers.ts`'s
+`rebuildsEngine` doc comment): don't use the "Building waveform…" placeholder text as
+the automated signal for "did a rebuild happen."** It's a fine signal for a human
+watching a real, slow rebuild (large session, cold module cache), but for a small
+synthetic test clip over an already-warm dynamic-import cache (true for every rebuild
+after the first on a given page load), the engine's internal `resolvePlayoutAdapter()`
+resolves via a microtask fast enough that React can batch the `isReady` false→true
+transition without ever committing an observably separate "not ready" DOM state —
+confirmed empirically (a MutationObserver watching for the placeholder text never
+fired across a rebuild that other evidence confirmed did happen). The reliable signal
+is the library's own `window` CustomEvent `"waveform-playlist:ready"` (confirmed in
+`@waveform-playlist/browser/dist/index.js` — dispatched exactly once, at the end of
+the full-rebuild `loadAudio()` path, never on the `isEngineTracks`/`isIncrementalAdd`
+skip-rebuild paths, which return early before reaching it). `rebuildsEngine()` in
+`e2e/helpers.ts` listens for this event; use it for any future test that needs to
+assert whether a mutation caused a full rebuild.
 
 ## Phased implementation
 
@@ -165,7 +188,10 @@ New:
   - `e2e/helpers.ts` — shared selectors/waits: `data-testid="current-time"`/
     `"total-duration"`, `[data-clip-id]:not([data-boundary-edge])` for the
     draggable clip element, a `waitForWaveformReady()` helper that waits for
-    "Building waveform…" to detach.
+    "Building waveform…" to detach, and (added during Phase 1) `rebuildsEngine()`
+    — the authoritative "did this action cause a full engine rebuild" signal,
+    via the library's `"waveform-playlist:ready"` window event, not the
+    placeholder text (see the gotcha noted in "Confirmed library behavior" above).
   - `e2e/playback.spec.ts` — first committed test, a smoke test porting the
     existing single-file and multi-clip playback verification (import, play,
     seek, zoom) — proves the harness itself works before Phase 1 adds anything
@@ -184,10 +210,10 @@ inspection, not proven under adversarial timing" per CLAUDE.md's own standard.
 ### Phase 1 — Metadata/hydration boundary (no history, no persistence)
 
 New files:
-- `audio-engine/types.ts` — `ClipMeta`/`TrackMeta`.
-- `audio-engine/assetRegistry.ts` — as above (content-hash `assetId`, registry is a
+- `audio-engine/persistence/types.ts` — `ClipMeta`/`TrackMeta`.
+- `audio-engine/persistence/assetRegistry.ts` — as above (content-hash `assetId`, registry is a
   pure buffer↔id lookup table, never mints an id itself).
-- `audio-engine/clipHydration.ts` — `hydrate`/`dehydrate` + the two caches above.
+- `audio-engine/persistence/clipHydration.ts` — `hydrate`/`dehydrate` + the two caches above.
 
 Modified:
 - `audio-engine/useTimelineTracks.ts` — state becomes `TrackMeta[]`; `addFilesToTrack`
@@ -208,15 +234,26 @@ Unchanged: `ClipDragLayer.tsx`, `ClipActionsOverlay.tsx`, `useScissorsSplit.ts`,
 **Verify** (extends the Phase 0 suite): full pass through every existing feature
 (import, same-track drag, cross-track drag, trim, split, duplicate, delete,
 add/remove track, playback, zoom). Confirm the "no spurious rebuild" cases above.
-Add a test uploading the same synthetic file twice (two separate "Upload clip"
-actions) and assert both clips reference the same `assetId` internally (or, more
-practically at the E2E level, assert only one asset write occurs once Phase 3
-exists — flag this specific assertion as a Phase 3 addition if it can't be
-observed before persistence exists).
+
+**Status: implemented and committed** (`e2e/hydration.spec.ts`, 7 tests). Using
+`rebuildsEngine()` (see above), committed coverage confirms: add-track and boundary
+trim (dragging a `data-boundary-edge` handle) and split do **not** rebuild;
+duplicate, delete, same-track drag, and cross-track drag **do** rebuild — every
+mutation type called out in this section, all via real `page.mouse` pointer-drag
+sequences for the drag/trim cases (not `locator.dragTo()`, which emulates HTML5 DnD —
+a different mechanism than dnd-kit's `PointerSensor`). `tsc --noEmit` and `eslint`
+are clean; the full suite (this file + `playback.spec.ts`, 9 tests) passed
+repeatedly against a fresh prod build with no flake observed across multiple runs.
+
+The cross-upload asset-dedup case (uploading the same synthetic file twice, via two
+separate "Upload clip" actions, and confirming both clips resolve to the same
+`assetId`) is deferred to Phase 3, where it's actually observable end-to-end (only
+one record written to IndexedDB for that content hash) — there's no way to assert
+it from the DOM alone before persistence exists.
 
 ### Phase 2 — Undo/redo via Zustand (still no persistence)
 
-Zustand store (`audio-engine/projectStore.ts`):
+Zustand store (`audio-engine/persistence/projectStore.ts`):
 ```ts
 interface HistoryEntry { label: string; before: TrackMeta[]; after: TrackMeta[]; }
 interface ProjectStoreState {
@@ -256,8 +293,8 @@ engine-driven commits become `commit(() => dehydrated, "Edit timeline")`) — on
 signature, no path that can accidentally pass a stale snapshot.
 
 New files:
-- `audio-engine/projectStore.ts` — as above.
-- `audio-engine/useUndoRedoShortcut.ts` — keydown listener mounted from
+- `audio-engine/persistence/projectStore.ts` — as above.
+- `audio-engine/persistence/useUndoRedoShortcut.ts` — keydown listener mounted from
   `EditorShell.tsx` (inside the provider tree). Wires Ctrl/Cmd+Z and
   Ctrl/Cmd+Shift+Z to `store.undo()`/`store.redo()`, gated on `isReady` (same
   signal already gating `TransportControls`). **Do not** enable the library's own
@@ -327,7 +364,7 @@ Playwright even with throttling.
 
 ### Phase 3 — IndexedDB persistence + initial-load rehydration
 
-`idb` schema (`audio-engine/persistence.ts`), DB `editor-pro` v1, two stores:
+`idb` schema (`audio-engine/persistence/persistence.ts`), DB `editor-pro` v1, two stores:
 - `project` — single fixed-key record: `{ schemaVersion: 1, tracks: TrackMeta[], updatedAt }`.
   Only the current `present` snapshot — **not** `past`/`future` (undo history doesn't
   need to survive a reload; keeps the record small and sidesteps any asset-GC-vs-
@@ -344,8 +381,8 @@ Functions: `saveProject(tracks)`, `loadProject()`, `saveAsset(assetId, blob)`,
 `loadAsset(assetId)`, `loadAssets(assetIds: string[])` (batched parallel read).
 
 New files:
-- `audio-engine/persistence.ts` — as above.
-- `audio-engine/useProjectHydration.ts` — mount-time effect: `loadProject()` →
+- `audio-engine/persistence/persistence.ts` — as above.
+- `audio-engine/persistence/useProjectHydration.ts` — mount-time effect: `loadProject()` →
   collect every distinct `assetId` referenced by any clip → `loadAssets(...)` →
   `decodeAudioData` each blob → `registerAsset(buffer, assetId)` (the persisted id
   — critical, minting a fresh one here would orphan every `ClipMeta.assetId`) →
@@ -354,7 +391,7 @@ New files:
   record) falls back to the default single-empty-track project and still flips
   `isProjectHydrating` false — never a permanent loading screen.
 
-Unchanged: `audio-engine/assetRegistry.ts` — Phase 1 already always calls
+Unchanged: `audio-engine/persistence/assetRegistry.ts` — Phase 1 already always calls
 `registerAsset` with a known id (the content hash), so Phase 3's rehydration path
 is just a second caller of the same function with a different (persisted, not
 freshly-hashed) known id. No redesign needed here, unlike the first draft of this

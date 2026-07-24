@@ -48,3 +48,62 @@ export async function uploadFiles(page: Page, files: UploadFile[]) {
   );
   await waitForWaveformReady(page);
 }
+
+type RebuildProbeWindow = {
+  __rebuildCount: number;
+  __rebuildListener?: EventListener;
+};
+
+/**
+ * Runs `action`, and reports whether it caused a full Tone.js engine
+ * dispose+rebuild — used to assert Phase 1's hydrate()/dehydrate() caches
+ * (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md's "Confirmed library behavior"
+ * section): trim/split/add-track must NOT rebuild; move/duplicate/delete/
+ * undo/redo still legitimately do.
+ *
+ * Listens for the library's own `window` CustomEvent
+ * `"waveform-playlist:ready"` (confirmed in
+ * @waveform-playlist/browser/dist/index.js — dispatched exactly once, at the
+ * end of the full-rebuild `loadAudio()` path, never on the
+ * isEngineTracks/isIncrementalAdd skip-rebuild paths, which return early
+ * before reaching it) — NOT the "Building waveform…" placeholder text.
+ *
+ * That placeholder was the first thing tried here and turned out to be an
+ * unreliable signal in this test environment: for a small synthetic clip
+ * over an already-warm dynamic-import module cache (true for every rebuild
+ * after the very first on a given page load), `resolvePlayoutAdapter()`'s
+ * internal `import()` resolves via a microtask rather than a real
+ * network/parse delay, fast enough that React can batch the
+ * isReady:false→true transition without ever committing an observably
+ * separate "not ready" DOM state — confirmed empirically (a MutationObserver
+ * watching for the placeholder text never fired across a rebuild that the
+ * `waveform-playlist:ready` event confirmed did happen). The placeholder is
+ * still a legitimate signal for a human watching a real, slow rebuild
+ * (large session, cold cache) — it's specifically unreliable as an
+ * *automated* detector against small synthetic fixtures like these.
+ */
+export async function rebuildsEngine(page: Page, action: () => Promise<void>): Promise<boolean> {
+  await page.evaluate(() => {
+    const w = window as unknown as RebuildProbeWindow;
+    w.__rebuildCount = 0;
+    const listener: EventListener = () => {
+      w.__rebuildCount += 1;
+    };
+    window.addEventListener("waveform-playlist:ready", listener);
+    w.__rebuildListener = listener;
+  });
+
+  await action();
+  await waitForWaveformReady(page);
+  // Give React/the engine one more tick to finish in case the event lands
+  // just after `action`'s own promise resolves.
+  await page.waitForTimeout(200);
+
+  return page.evaluate(() => {
+    const w = window as unknown as RebuildProbeWindow;
+    if (w.__rebuildListener) {
+      window.removeEventListener("waveform-playlist:ready", w.__rebuildListener);
+    }
+    return w.__rebuildCount > 0;
+  });
+}

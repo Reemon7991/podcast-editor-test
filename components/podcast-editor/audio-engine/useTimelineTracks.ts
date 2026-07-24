@@ -2,9 +2,10 @@
 
 import { useCallback, useState } from "react";
 import * as Tone from "tone";
-import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
+import { hashFileBytes, registerAsset } from "./persistence/assetRegistry";
+import type { ClipMeta, TrackMeta } from "./persistence/types";
 
-function createEmptyTrack(index: number): ClipTrack {
+function createEmptyTrack(index: number): TrackMeta {
   return {
     id: crypto.randomUUID(),
     name: `Track ${index}`,
@@ -23,14 +24,18 @@ function createEmptyTrack(index: number): ClipTrack {
  * single-track design — would silently discard any manual drag the moment
  * something else (a new import, a gap change) triggered a recompute.
  *
- * Track/clip identity is stable across renders, and WaveformPlaylistProvider's
- * onTracksChange callback (wired in TimelineStage) feeds engine-driven moves
- * (same-track drag) straight back into this same `tracks` state, using the
- * exact array reference the engine handed back — see WaveformPlaylistProvider's
- * docs on reference-identity rebuild-skipping.
+ * Track/clip identity is stable across renders. State here is `TrackMeta[]`
+ * (metadata only, no decoded audio) — TimelineStage.tsx is the sole
+ * boundary that joins it with real audio via hydrate()/dehydrate() before
+ * it reaches WaveformPlaylistProvider; see
+ * audio-engine/persistence/clipHydration.ts and
+ * PERSISTENCE_UNDO_ORIGINAL_PLAN.md's "Core mechanism" section for why, and
+ * for how engine-driven moves (same-track drag) still get to feed back into
+ * this same state via reference-identity rebuild-skipping despite that
+ * boundary sitting in between.
  */
 export function useTimelineTracks() {
-  const [tracks, setTracks] = useState<ClipTrack[]>(() => [createEmptyTrack(1)]);
+  const [tracks, setTracks] = useState<TrackMeta[]>(() => [createEmptyTrack(1)]);
   const [loadingCount, setLoadingCount] = useState(0);
 
   const addTrack = useCallback(() => {
@@ -60,8 +65,14 @@ export function useTimelineTracks() {
         const results = await Promise.allSettled(
           files.map(async (file) => {
             const arrayBuffer = await file.arrayBuffer();
+            // Hash before decoding, not after — see assetRegistry.ts's
+            // hashFileBytes doc comment on why (decodeAudioData buffer
+            // detachment). assetId is content-addressed so two independent
+            // uploads of the same bytes dedupe for free.
+            const assetId = await hashFileBytes(arrayBuffer);
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-            return { file, audioBuffer };
+            registerAsset(audioBuffer, assetId);
+            return { file, audioBuffer, assetId };
           })
         );
 
@@ -70,7 +81,7 @@ export function useTimelineTracks() {
             if (track.id !== trackId) return track;
             let cursor = 0;
             let cursorInitialized = false;
-            const appended: AudioClip[] = [];
+            const appended: ClipMeta[] = [];
             for (const result of results) {
               if (result.status === "rejected") {
                 console.error(
@@ -79,7 +90,7 @@ export function useTimelineTracks() {
                 );
                 continue;
               }
-              const { file, audioBuffer } = result.value;
+              const { file, audioBuffer, assetId } = result.value;
               if (!cursorInitialized) {
                 cursor = Math.round(insertionTimeSeconds * audioBuffer.sampleRate);
                 cursorInitialized = true;
@@ -87,7 +98,7 @@ export function useTimelineTracks() {
               const startSample: number = cursor;
               appended.push({
                 id: crypto.randomUUID(),
-                audioBuffer,
+                assetId,
                 startSample,
                 durationSamples: audioBuffer.length,
                 offsetSamples: 0,
