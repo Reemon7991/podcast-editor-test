@@ -293,6 +293,35 @@ playback guard on duplicate and undo. Full suite (18 tests: this file,
 `hydration.spec.ts`, `playback.spec.ts`) passed repeatedly against a fresh
 prod build with no flake observed.
 
+### Post-Phase-2 regression: "editing while playing" guard, now centralized (FIXED)
+
+Phase 2 broke the "editing while already playing" fix documented further down
+("A second, unrelated instance of the same race") — `tracks` moving into
+Zustand meant `stop()`'s `setIsPlaying(false)` no longer reliably batches
+into the same React commit as the tracks-changing commit, so the provider's
+rebuild effect could still observe `isPlaying: true`. Two other mutations
+(`addFilesToTrack`/"Upload clip", `removeTrack`) turned out to have never had
+this guard at all, in any phase.
+
+Fixed by centralizing into `store/projectStore.ts`: a module-level
+`stopIfPlaying` callback (registered once from `EditorShell.tsx`, the
+component with actual `stop()`/`isPlaying` access, via
+`registerStopIfPlaying()`), called with `flushSync` from `commit`/`undo`/
+`redo` before mutating. Every mutation that goes through `commit` — today
+and any future one — gets the guard for free; `ClipActionsOverlay.tsx`/
+`useUndoRedoShortcut.ts`/`UndoRedoButtons.tsx` dropped their now-redundant
+local guards. `ClipDragLayer.tsx`'s move-drag guard stays local and manual
+(the one exception): moves reach `commitEngineOutput`, which also carries
+trim/split's engine-driven mirror-back that must **not** stop playback, and
+only that call site can tell the two apart.
+
+Also fixed in the same pass: `e2e/hydration.spec.ts`'s "adding a track does
+not rebuild" test was genuinely flaky (unrelated to the above, reproduced
+against an unmodified checkout too) — `rebuildsEngine()` in `e2e/helpers.ts`
+now waits for the initial mount's own rebuild-counter tick before capturing
+its "before" snapshot, closing a real race in the harness itself. Verified
+with 15 repeated runs, no flake.
+
 ### Phase 3 — IndexedDB persistence + initial-load rehydration (not started)
 
 ## Critical setup gotchas (do not re-discover these)

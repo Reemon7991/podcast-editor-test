@@ -1,12 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { Waveform, usePlaylistData, usePlaylistControls, usePlaylistState } from "@waveform-playlist/browser";
+import { flushSync } from "react-dom";
+import {
+  Waveform,
+  usePlaybackAnimation,
+  usePlaylistData,
+  usePlaylistControls,
+  usePlaylistState,
+} from "@waveform-playlist/browser";
 import { TransportControls } from "../transport/TransportControls";
 import { ClipDragLayer } from "./ClipDragLayer";
 import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
+import { registerStopIfPlaying } from "../../store/projectStore";
 
 interface EditorShellProps {
   onRemoveTrack: (trackIndex: number) => void;
@@ -29,11 +37,29 @@ export function EditorShell({
 }: EditorShellProps) {
   const { isReady, tracks, timeScaleHeight } = usePlaylistData();
   const { selectedTrackId } = usePlaylistState();
-  const { scrollContainerRef, setSelectedTrackId } = usePlaylistControls();
+  const { scrollContainerRef, setSelectedTrackId, stop } = usePlaylistControls();
+  const { isPlaying } = usePlaybackAnimation();
   // Owned here (not inside PlayButton/ClipDragLayer) since both need it —
   // see the doc comments on transport/PlayButton.tsx and
   // timeline/ClipDragLayer.tsx for the play()/rebuild race this closes.
   const playPendingRef = useRef(false);
+
+  // Registers this provider's actual stop()/isPlaying with the project store
+  // (see projectStore.ts's own doc comment on stopIfPlaying/
+  // registerStopIfPlaying) so `commit`/`undo`/`redo` — called from outside
+  // this provider's context, e.g. useTimelineTracks.ts's addFilesToTrack
+  // after an async decode — can still stop playback before a rebuild-forcing
+  // mutation, without every call site needing its own guard. Kept fresh
+  // every render (no dep array), same as the sticky-ref pattern below.
+  // flushSync (not a plain call) is required for the same reason as
+  // ClipDragLayer.tsx's onDragEnd — see its doc comment for the full trace of
+  // why a plain stop() isn't enough once tracks flows through the Zustand
+  // store.
+  useEffect(() => {
+    registerStopIfPlaying(() => {
+      if (isPlaying) flushSync(() => stop());
+    });
+  });
 
   // Sticky ref: always holds the last known non-null selectedTrackId, defaulting
   // to the first track. This is immune to the browser clearing the library's

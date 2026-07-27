@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, type ComponentProps, type ReactNode, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import { DragDropProvider } from "@dnd-kit/react";
 import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
 import {
@@ -259,11 +260,34 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       // after-rebuild logic, which has the same check-then-act race as the
       // play()/rebuild one above but fires unconditionally (100% reproducible,
       // not timing-dependent) — see CLAUDE.md's "editing while already
-      // playing" section for the full trace. `stop()` is synchronous, so
-      // calling it here batches with the state update below into one commit,
-      // and the rebuild effect never sees playback as active.
+      // playing" section for the full trace. `stop()` alone used to be enough
+      // (it's synchronous, no `await`), on the assumption that it'd batch
+      // into the same commit as the `onTracksChange` call below — true when
+      // both `isPlaying` and `tracks` lived in plain React state under the
+      // same root. Since Phase 2, `tracks` flows through a Zustand store
+      // instead, and that external-store-triggered re-render does not
+      // reliably land in the same commit as `stop()`'s own `setIsPlaying`
+      // (confirmed by direct instrumentation of the vendored provider: the
+      // rebuild effect observed `wasPlaying: true` even though `stop()` had
+      // already run earlier in the same synchronous callback) — so the
+      // library's buggy pendingResumeRef/resumePlayback path armed anyway,
+      // corrupting the engine exactly as before. `flushSync` forces `stop()`'s
+      // render (and the `isPlayingRef.current = isPlaying` line the provider
+      // syncs during render) to fully commit before `onTracksChange` runs,
+      // making the ordering correct regardless of whether the two updates
+      // would otherwise batch.
+      //
+      // Kept local here rather than centralized into projectStore.ts's
+      // `commit` (see its `stopIfPlaying`/`registerStopIfPlaying` doc
+      // comment, which now covers duplicate/delete/add-remove-track/import/
+      // undo/redo): `onTracksChange` below reaches `commitEngineOutput`, not
+      // `commit` — and `commitEngineOutput` also carries trim/split's
+      // engine-driven mirror-back, which must NOT stop playback (no rebuild
+      // happens for those). Only this call site knows it's about to
+      // hand-apply a move rather than mirror an engine transaction, so only
+      // it can guard correctly.
       if (isPlaying) {
-        stop();
+        flushSync(() => stop());
       }
 
       // No engine.moveClip()/trimClip() call was made on this transaction —

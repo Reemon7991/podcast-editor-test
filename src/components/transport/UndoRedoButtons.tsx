@@ -1,38 +1,25 @@
 "use client";
 
 import { BaseControlButton } from "@waveform-playlist/ui-components";
-import { usePlaybackAnimation, usePlaylistControls } from "@waveform-playlist/browser";
 import { useProjectStore, selectCanUndo, selectCanRedo } from "../../store/projectStore";
 
 /**
- * Same stop()-if-isPlaying guard as useUndoRedoShortcut.ts's keyboard path —
- * both need it independently since a user can trigger undo/redo via either
- * the keyboard shortcut or these buttons.
+ * No local stop()-if-playing guard needed — undo()/redo() themselves stop
+ * playback first if needed (see projectStore.ts's `stopIfPlaying`/
+ * `registerStopIfPlaying` doc comment), same as `commit`.
  */
 export function UndoRedoButtons() {
   const undo = useProjectStore((s) => s.undo);
   const redo = useProjectStore((s) => s.redo);
   const canUndo = useProjectStore(selectCanUndo);
   const canRedo = useProjectStore(selectCanRedo);
-  const { isPlaying } = usePlaybackAnimation();
-  const { stop } = usePlaylistControls();
-
-  const handleUndo = () => {
-    if (isPlaying) stop();
-    undo();
-  };
-
-  const handleRedo = () => {
-    if (isPlaying) stop();
-    redo();
-  };
 
   return (
     <>
-      <BaseControlButton onClick={handleUndo} disabled={!canUndo} title="Undo" aria-label="Undo">
+      <BaseControlButton onClick={undo} disabled={!canUndo} title="Undo" aria-label="Undo">
         <UndoIcon />
       </BaseControlButton>
-      <BaseControlButton onClick={handleRedo} disabled={!canRedo} title="Redo" aria-label="Redo">
+      <BaseControlButton onClick={redo} disabled={!canRedo} title="Redo" aria-label="Redo">
         <RedoIcon />
       </BaseControlButton>
     </>

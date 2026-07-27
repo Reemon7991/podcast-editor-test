@@ -3,6 +3,39 @@ import type { ClipTrack } from "@waveform-playlist/browser";
 import type { TrackMeta } from "../utils/types";
 import { deepEqual } from "../utils/deepEqual";
 
+/**
+ * Module-level, never part of React/Zustand state — same pattern as
+ * utils/assetRegistry.ts, and for the same reason: this is an imperative
+ * escape hatch, not project data, so it has no business triggering
+ * subscriber re-renders when it changes.
+ *
+ * Registered once from EditorShell.tsx (the component with actual
+ * usePlaylistControls().stop()/usePlaybackAnimation().isPlaying access —
+ * the store itself lives outside WaveformPlaylistProvider's context and
+ * can't reach either directly), kept fresh every render there. `commit`/
+ * `undo`/`redo` call it before mutating `present`, so every *hand-applied*
+ * mutation (duplicate, delete, add/remove track, import, undo, redo — today
+ * and any future one that goes through `commit`) gets the playing-while-
+ * editing guard for free, without each call site needing to remember to add
+ * it — see CLAUDE.md's "editing while already playing" section for why the
+ * guard exists at all, and this file's own doc comments below for why it has
+ * to be `flushSync`'d by the caller, not a plain `stop()`.
+ *
+ * Deliberately NOT called from `commitEngineOutput`: that path also carries
+ * trim/split's engine-driven mirror-back, which must NOT stop playback (no
+ * rebuild happens for those — stopping would be a pure regression). Only a
+ * hand-applied *move* (ClipDragLayer.tsx's onDragEnd) reaches
+ * commitEngineOutput in a way that actually needs the guard, and that one
+ * call site is the only place that can tell the difference (it knows it's
+ * about to hand-apply a move, vs. mirror back an engine transaction) — so it
+ * keeps its own local guard instead of relying on this one.
+ */
+let stopIfPlaying: () => void = () => {};
+
+export function registerStopIfPlaying(fn: () => void): void {
+  stopIfPlaying = fn;
+}
+
 export function createEmptyTrack(index: number): TrackMeta {
   return {
     id: crypto.randomUUID(),
@@ -127,7 +160,11 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
   lastEngineOutput: null,
   dragBaseline: null,
 
-  commit: (update, label) =>
+  commit: (update, label) => {
+    // Called before `set`, not inside its updater — flushSync (which
+    // stopIfPlaying uses internally, see its own doc comment above) throws if
+    // called from inside another component's render/commit.
+    stopIfPlaying();
     set((state) => {
       const before = state.present;
       const after = update(before);
@@ -136,7 +173,8 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
         past: [...state.past, { label, before, after }].slice(-HISTORY_LIMIT),
         future: [],
       };
-    }),
+    });
+  },
 
   commitEngineOutput: (raw, dehydrated) =>
     set((state) => {
@@ -161,7 +199,8 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
 
   cancelLiveDrag: () => set({ dragBaseline: null }),
 
-  undo: () =>
+  undo: () => {
+    stopIfPlaying();
     set((state) => {
       if (state.past.length === 0) return state;
       const entry = state.past[state.past.length - 1];
@@ -170,9 +209,11 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
         past: state.past.slice(0, -1),
         future: [...state.future, entry],
       };
-    }),
+    });
+  },
 
-  redo: () =>
+  redo: () => {
+    stopIfPlaying();
     set((state) => {
       if (state.future.length === 0) return state;
       const entry = state.future[state.future.length - 1];
@@ -181,7 +222,8 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
         past: [...state.past, entry],
         future: state.future.slice(0, -1),
       };
-    }),
+    });
+  },
 
   replacePresent: (tracks) => set({ present: tracks, past: [], future: [] }),
 }));

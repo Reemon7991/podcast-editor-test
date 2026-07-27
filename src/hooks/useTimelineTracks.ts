@@ -14,6 +14,12 @@ import { createEmptyTrack, useProjectStore } from "../store/projectStore";
  * `TimelineStage.tsx` is the sole boundary that joins `present` (`TrackMeta[]`,
  * metadata only, no decoded audio) with real audio via hydrate()/dehydrate()
  * before it reaches WaveformPlaylistProvider.
+ *
+ * `commit` itself stops playback first if needed (see projectStore.ts's
+ * `stopIfPlaying`/`registerStopIfPlaying`) — addFilesToTrack doesn't need its
+ * own guard even though it's async (decode happens before the commit below):
+ * `commit` reads *current* isPlaying at the moment it actually runs, which is
+ * exactly when this call happens, right after decode settles.
  */
 export function useTimelineTracks() {
   const tracks = useProjectStore((s) => s.present);

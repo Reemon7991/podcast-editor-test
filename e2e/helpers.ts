@@ -118,6 +118,23 @@ export async function uploadFiles(page: Page, files: UploadFile[]) {
  * *automated* detector against small synthetic fixtures like these.
  */
 export async function rebuildsEngine(page: Page, action: () => Promise<void>): Promise<boolean> {
+  // The initial mount's own "waveform-playlist:ready" dispatch is not
+  // strictly ordered relative to the "Building waveform…" placeholder
+  // clearing (see gotoEditor's doc comment) — it can arrive up to a few
+  // hundred ms *after* waitForWaveformReady() already resolved. A test that
+  // calls rebuildsEngine() immediately after gotoEditor()/
+  // waitForWaveformReady() with no other action in between (e.g. "adding a
+  // track does not rebuild the engine", the one test with no buffer time to
+  // absorb this) can read `before` while that event is still in flight,
+  // then have it land *during* the action's own wait window instead,
+  // producing a false "rebuilt: true". Waiting here for the counter to have
+  // ticked at least once — the initial mount always goes through a full
+  // rebuild, so it always fires exactly once — guarantees that leftover
+  // event has already landed before `before` is captured, for every caller,
+  // not just ones that happen to have an intervening action already.
+  await page.waitForFunction(
+    () => (window as unknown as RebuildProbeWindow).__rebuildCount >= 1
+  );
   const before = await page.evaluate(() => (window as unknown as RebuildProbeWindow).__rebuildCount);
 
   await action();
