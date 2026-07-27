@@ -36,6 +36,24 @@ export function registerStopIfPlaying(fn: () => void): void {
   stopIfPlaying = fn;
 }
 
+/**
+ * `undo`/`redo` clone every track object before restoring, deliberately
+ * breaking reference equality. Reason: the library's incremental-add
+ * fast-path only checks that old track objects still exist *somewhere* in
+ * the new array, not at the same *position* — its `engine.addTrack()`
+ * remedy always appends to the end. Undoing a "Remove track" (or redoing an
+ * "Add track" after other track-count changes) can restore a track to the
+ * *middle* of the array; the library still takes the fast-path, appends it
+ * at the end instead, and mirrors that reordered mismatch back as a
+ * spurious history entry that wipes `future` (confirmed via direct
+ * instrumentation). Cloning forces a full rebuild instead, which is always
+ * safe. Not needed in `commit`/`commitEngineOutput` — only undo/redo can
+ * reintroduce a track at a non-end position.
+ */
+function cloneTracks(tracks: TrackMeta[]): TrackMeta[] {
+  return tracks.map((track) => ({ ...track }));
+}
+
 export function createEmptyTrack(index: number): TrackMeta {
   return {
     id: crypto.randomUUID(),
@@ -205,7 +223,7 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
       if (state.past.length === 0) return state;
       const entry = state.past[state.past.length - 1];
       return {
-        present: entry.before,
+        present: cloneTracks(entry.before),
         past: state.past.slice(0, -1),
         future: [...state.future, entry],
       };
@@ -218,7 +236,7 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
       if (state.future.length === 0) return state;
       const entry = state.future[state.future.length - 1];
       return {
-        present: entry.after,
+        present: cloneTracks(entry.after),
         past: [...state.past, entry],
         future: state.future.slice(0, -1),
       };
