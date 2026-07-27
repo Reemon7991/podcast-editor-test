@@ -30,6 +30,17 @@ export const SELECTORS = {
  * been removed.
  */
 export async function waitForWaveformReady(page: Page) {
+  // Phase 3 added an async IndexedDB hydration step (useProjectHydration.ts)
+  // that runs before TimelineStage — and its "Building waveform…"
+  // placeholder — ever mounts. Without waiting for the earlier "Loading
+  // project…" placeholder first, this could resolve while still on that
+  // pre-mount screen (zero "Building waveform…" matches is trivially true
+  // there too), then the caller would go on to interact with elements
+  // (upload input, "+ New Track") that don't exist yet. Same
+  // waitFor({state:"hidden"}) safety as below applies here too: resolves
+  // immediately if hydration was already fast enough that this text never
+  // appeared at all.
+  await page.getByText("Loading project…").waitFor({ state: "hidden" });
   await page.getByText("Building waveform…").waitFor({ state: "hidden" });
 }
 

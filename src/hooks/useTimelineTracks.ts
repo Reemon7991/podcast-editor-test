@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
+import { saveAsset } from "../utils/persistence";
 import type { ClipMeta } from "../utils/types";
 import { createEmptyTrack, useProjectStore } from "../store/projectStore";
 
@@ -68,7 +69,17 @@ export function useTimelineTracks() {
             // detachment). assetId is content-addressed so two independent
             // uploads of the same bytes dedupe for free.
             const assetId = await hashFileBytes(arrayBuffer);
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            // Decode and persist concurrently — persistence is a Phase 3
+            // add-on to an already-working import path, so a save failure
+            // (quota, private browsing) is logged and swallowed rather than
+            // failing the import itself; the clip still works for this
+            // session, it just won't survive a reload.
+            const [audioBuffer] = await Promise.all([
+              audioContext.decodeAudioData(arrayBuffer),
+              saveAsset(assetId, file).catch((err) => {
+                console.error("[podcast-editor] Failed to persist asset to IndexedDB", err);
+              }),
+            ]);
             registerAsset(audioBuffer, assetId);
             return { file, audioBuffer, assetId };
           })

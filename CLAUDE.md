@@ -11,9 +11,9 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open (export; undo/redo is done and persistence is in
-progress — see "Persistence + Undo/Redo layer" below — including a committed
-test suite, though so far scoped to that layer, not the rest of the app).
+the concrete gaps still open (export; undo/redo and persistence are both done
+— see "Persistence + Undo/Redo layer" below — including a committed test
+suite, though so far scoped to that layer, not the rest of the app).
 Every non-obvious decision below exists because of something concretely
 discovered while building this, not speculation — treat this file as the
 fastest way to avoid re-deriving that work in a future session.
@@ -50,9 +50,9 @@ makes sense to build on top of; split/fades and effects are independent of
 those two; the AI features are the most speculative and probably last).
 
 1. **Persistence** — project state (tracks/clips, decoded audio) survives
-   a reload. **In progress, not done yet** — see "Persistence + Undo/Redo
-   layer" below for current status; don't treat this bullet as current truth,
-   it's only kept here for the ordering rationale in the paragraph above.
+   a reload. **Done** — see "Persistence + Undo/Redo layer" below for the
+   actual design; don't treat this bullet as current truth, it's only kept
+   here for the ordering rationale in the paragraph above.
 2. **Undo/redo** — the library's own `WaveformPlaylistProvider` context
    already exposes `undo`/`redo`/`canUndo`/`canRedo` (confirmed in
    `@waveform-playlist/browser`'s public `.d.ts`), but those only cover
@@ -147,7 +147,7 @@ everything else (JSX components) stayed under `components/`, just one level
 shallower — no more `podcast-editor/` wrapper, since the whole project is the
 podcast editor.
 
-## Persistence + Undo/Redo layer (undo/redo done, persistence in progress)
+## Persistence + Undo/Redo layer (undo/redo and persistence both done)
 
 Full design: `PERSISTENCE_UNDO_ORIGINAL_PLAN.md` — written, reviewed against
 this codebase's actual state (including a verification pass against the
@@ -322,7 +322,118 @@ now waits for the initial mount's own rebuild-counter tick before capturing
 its "before" snapshot, closing a real race in the harness itself. Verified
 with 15 repeated runs, no flake.
 
-### Phase 3 — IndexedDB persistence + initial-load rehydration (not started)
+### Post-Phase-2 fix: redo corruption after undoing track add/remove sequences (FIXED)
+
+`undo()`/`redo()` handed back `entry.before`/`entry.after` directly, preserving
+track object references. That satisfied the library's incremental-add
+fast-path (which only checks that old track objects still exist *somewhere* in
+the new array, not at the same *position* — its `engine.addTrack()` remedy
+always appends to the end) even when a removed track was being restored to
+the *middle* of the array rather than the end. The library still appended it
+at the end instead, and mirrored that reordered mismatch back as a spurious
+history entry that silently wiped `future` — breaking redo partway through a
+mixed undo/redo sequence involving add/remove track. Fixed by cloning every
+track object in `undo`/`redo` (`store/projectStore.ts`'s `cloneTracks`),
+deliberately breaking reference equality to force a full rebuild (always
+safe) instead of the position-blind incremental path. Not needed in
+`commit`/`commitEngineOutput` — only undo/redo can reintroduce a track at a
+non-end position.
+
+### Phase 3 — IndexedDB persistence + initial-load rehydration (done)
+
+`idb` (thin Promise wrapper over IndexedDB, not `localforage` — no need for
+its legacy storage-fallback layer) backs `utils/persistence.ts`: DB
+`editor-pro` v1, two stores. `project` holds a single fixed-key record
+(`{ schemaVersion, tracks: TrackMeta[], updatedAt }`) — only the current
+`present` snapshot, never `past`/`future` (undo history doesn't need to
+survive a reload). `assets` holds the original uploaded `File`/`Blob` (not the
+decoded `AudioBuffer` — no cheap re-encode path back to a file), keyed by the
+same content-hash `assetId` from Phase 1, so a repeat upload of identical
+bytes is an idempotent overwrite, not a duplicate — cross-upload dedup is a
+property of the key, no extra logic needed. `getDb()`'s `openDB()` call is
+lazy (first actual use, inside an effect), never at module scope — confirmed
+`idb` itself doesn't touch `window`/`indexedDB` at import time either, but
+deferring costs nothing and the plan's own gotcha here didn't need to be
+relied on: `persistence.ts` is only ever reached through `PodcastEditor.tsx`,
+which is already behind `PodcastEditorLoader.tsx`'s `next/dynamic(ssr:false)`
+boundary, so nothing in this chain is ever part of the server bundle at all.
+
+`hooks/useProjectHydration.ts` — mount effect (guarded by a ref against
+Strict Mode's dev-only double-invoke): `loadProject()` → collect every
+distinct `assetId` referenced → `loadAssets()` (batched parallel read) →
+decode each blob (`Tone.getContext().rawContext.decodeAudioData`) →
+`registerAsset(buffer, assetId)` **using the persisted id** (minting a fresh
+one here would orphan every `ClipMeta.assetId` already in the loaded tracks —
+`assetRegistry.ts` never mints ids itself, by design since Phase 1, so this is
+just a second caller of the same function with a different, non-hashed known
+id) → `store.replacePresent(tracks)`. Wrapped in try/catch: any failure
+(private-browsing storage block, quota error, a corrupt record) falls back to
+the store's default single-empty-track project instead of surfacing an error.
+One gap the original plan didn't spell out and this pass closed: a per-asset
+decode failure or a genuinely missing blob (asset GC still isn't
+implemented — see "Known limitations" — but the store could still be cleared
+out-of-band) is handled one level more granularly than "fail the whole
+hydration" — only the clips referencing the unresolved asset are dropped, so
+one bad asset doesn't take down the whole reload.
+
+`useTimelineTracks.ts`'s `addFilesToTrack` now also calls `saveAsset(assetId,
+file)`, run concurrently with `decodeAudioData` via `Promise.all` (save
+failure is logged and swallowed, not thrown — persistence degrading
+gracefully shouldn't break an otherwise-successful import). `PodcastEditor.tsx`
+mounts `useProjectHydration()`, renders a `"Loading project…"` placeholder
+(same visual language as `PodcastEditorLoader.tsx`'s own loading state, for a
+consistent two-stage load) in place of `TimelineStage` while hydrating — which
+also means no user mutation can race `replacePresent`, since nothing is
+interactive yet — and mounts a 500ms trailing-edge debounced `saveProject`
+effect on `present`, armed only once hydration completes.
+
+**Two things found while building this, worth not re-discovering:**
+
+- **Every existing test's `waitForWaveformReady()` needed to learn about the
+  new pre-mount loading stage.** It previously just waited for "Building
+  waveform…" to hide; once hydration runs *before* `TimelineStage` (and that
+  placeholder) ever mounts, that wait could resolve while still on the
+  `"Loading project…"` screen (zero "Building waveform…" matches is trivially
+  true there too) — then the test would go on to click controls that don't
+  exist yet. Fixed once, in `e2e/helpers.ts`, so every spec benefits: wait for
+  `"Loading project…"` hidden first, then `"Building waveform…"` hidden — safe
+  in both cases even if a given placeholder never appears at all (hydration
+  fast enough, or the very first build already done), same
+  `waitFor({state:"hidden"})` property the original placeholder wait already
+  relied on.
+- **A raw `indexedDB.open()` call from a Playwright `page.evaluate()`,
+  immediately after this app has fully loaded, intermittently stalls for 30s+
+  before *any* of open/onsuccess/onerror ever fires** — reproduced repeatedly
+  under `playwright test`'s worker-reused-browser-process + `--repeat-each`,
+  never once across dozens of manual repros in a freshly-launched browser
+  process outside the test runner (including with the app's own debounced
+  save deliberately timed to be mid-flight). Reads as a Chromium/Windows-level
+  IndexedDB connection-teardown timing quirk tied to how Playwright recycles
+  contexts within one browser process — not a defect in `persistence.ts`/
+  `useProjectHydration.ts`, both of which are exercised (via the app's own
+  `idb` calls, not a bypassing raw connection) by the round-trip and dedup
+  tests below and passed reliably in every run. Only one committed test needs
+  a raw connection at all (to corrupt a record out-of-band); it's isolated in
+  its own `describe` with `retries: 2` and a doc comment disclosing this,
+  same treatment as the two playback-guard races elsewhere in this file that
+  are correct by inspection but not reliably provable under Playwright timing.
+  Navigating to a same-origin 404 route before opening the raw connection
+  (tearing down `useProjectHydration.ts`'s own long-lived connection first)
+  measurably reduces how often this hits but doesn't eliminate it.
+
+Committed coverage (`e2e/persistence.spec.ts`, 4 tests): a fresh IndexedDB
+still renders the default empty project without hanging; import → trim →
+reload restores the same clip and playback still works against the
+re-decoded buffer; a corrupt persisted record falls back to the default
+project instead of hanging (the try/catch path above); uploading the same
+file twice writes exactly one `assets` record (the cross-upload dedup case
+Phase 1 deferred here, now actually observable end-to-end) and both clips
+still resolve correctly after a reload. Full suite (22 tests: this file plus
+`hydration.spec.ts`, `playback.spec.ts`, `undoRedo.spec.ts`) passed repeatedly
+against a fresh prod build.
+
+Not built (disclosed, matches the original plan's "not in scope"): asset
+garbage collection, multi-tab sync, persisting undo history itself.
 
 ## Critical setup gotchas (do not re-discover these)
 
