@@ -6,6 +6,7 @@ import { PlayButton } from "./PlayButton";
 import { PlaybackTime } from "./PlaybackTime";
 import { DurationLabel } from "./DurationLabel";
 import { UndoRedoButtons } from "./UndoRedoButtons";
+import { ExportButton } from "./ExportButton";
 
 interface TransportControlsProps {
   /** Threaded through to PlayButton — see its doc comment and
@@ -17,6 +18,10 @@ interface TransportControlsProps {
    *  handleUpload reads the live value at file-dialog-close time, not the
    *  (already-cleared) React render value at button-click time. */
   activeTrackIdRef: RefObject<string | null>;
+  /** From useProjectExport(), owned by EditorShell — see its doc comment. */
+  exportProject: () => Promise<unknown>;
+  isExporting: boolean;
+  exportError: string | null;
 }
 
 /**
@@ -25,7 +30,14 @@ interface TransportControlsProps {
  * WaveformPlaylistProvider's context, so no props need to be threaded for
  * them. PlayButton is our own replacement (see transport/PlayButton.tsx).
  */
-export function TransportControls({ playPendingRef, onAddFilesToTrack, activeTrackIdRef }: TransportControlsProps) {
+export function TransportControls({
+  playPendingRef,
+  onAddFilesToTrack,
+  activeTrackIdRef,
+  exportProject,
+  isExporting,
+  exportError,
+}: TransportControlsProps) {
   const {} = usePlaylistControls();
   const { currentTime } = usePlaybackAnimation();
   const {} = usePlaylistData();
@@ -72,7 +84,12 @@ export function TransportControls({ playPendingRef, onAddFilesToTrack, activeTra
         <DurationLabel />
       </div>
 
-      <div className="ml-auto flex items-center">
+      <div className="ml-auto flex items-center gap-2">
+        <ExportButton
+          exportProject={exportProject}
+          isExporting={isExporting}
+          error={exportError}
+        />
         <button
           type="button"
           onClick={() => inputRef.current?.click()}

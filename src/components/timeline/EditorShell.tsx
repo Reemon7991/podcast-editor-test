@@ -14,6 +14,7 @@ import { ClipDragLayer } from "./ClipDragLayer";
 import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
+import { useProjectExport } from "../../hooks/useProjectExport";
 import { registerStopIfPlaying } from "../../store/projectStore";
 
 interface EditorShellProps {
@@ -35,7 +36,7 @@ export function EditorShell({
   onDuplicateClip,
   onDeleteClip,
 }: EditorShellProps) {
-  const { isReady, tracks, timeScaleHeight } = usePlaylistData();
+  const { isReady, tracks, trackStates, timeScaleHeight } = usePlaylistData();
   const { selectedTrackId } = usePlaylistState();
   const { scrollContainerRef, setSelectedTrackId, stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
@@ -43,6 +44,10 @@ export function EditorShell({
   // see the doc comments on transport/PlayButton.tsx and
   // timeline/ClipDragLayer.tsx for the play()/rebuild race this closes.
   const playPendingRef = useRef(false);
+
+  // Owned here so the "disable transport while busy" guard below can also
+  // cover export (an offline render temporarily swaps Tone's global context).
+  const { exportProject, isExporting, error: exportError } = useProjectExport(tracks, trackStates);
 
   // Registers this provider's actual stop()/isPlaying with the project store
   // (see projectStore.ts's own doc comment on stopIfPlaying/
@@ -151,13 +156,17 @@ export function EditorShell({
        *  is pressed mid-rebuild. isReady is the provider's own rebuild-done
        *  signal — gating the transport bar on it closes that window. */}
       <div
-        className={isReady ? undefined : "pointer-events-none opacity-50"}
-        aria-disabled={!isReady}
+        data-testid="transport-bar"
+        className={isReady && !isExporting ? undefined : "pointer-events-none opacity-50"}
+        aria-disabled={!isReady || isExporting}
       >
         <TransportControls
           playPendingRef={playPendingRef}
           onAddFilesToTrack={onAddFilesToTrack}
           activeTrackIdRef={activeTrackIdRef}
+          exportProject={exportProject}
+          isExporting={isExporting}
+          exportError={exportError}
         />
       </div>
       <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">

@@ -11,10 +11,10 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open (export; undo/redo and persistence are both done
-— see "Persistence + Undo/Redo layer" below — including a committed test
-suite, so far scoped to that layer and to fade in/out — see "Fade in/out"
-below — not the rest of the app).
+the concrete gaps still open. Persistence, undo/redo, fade in/out, and export
+are all done now (see "Persistence + Undo/Redo layer", "Fade in/out", and
+"Export" below), each with a committed test suite — but that coverage is
+still scoped to those layers, not the rest of the app.
 Every non-obvious decision below exists because of something concretely
 discovered while building this, not speculation — treat this file as the
 fastest way to avoid re-deriving that work in a future session.
@@ -62,8 +62,10 @@ those two; the AI features are the most speculative and probably last).
    "Persistence + Undo/Redo layer" below for the actual design (superseded
    the sketch this bullet used to contain) and the real bugs found building it.
 3. **Export** — render the mixdown (all tracks/clips/gains) to an audio file
-   the user can download. Currently the editor can only play back in-browser;
-   there's no way to get audio out of it at all.
+   the user can download. **Done** — see "Export" below for the actual
+   design (it's not the hand-rolled `OfflineAudioContext` mixdown this bullet
+   originally implied — the library already ships one) and a real bug found
+   in the library's own solo/mute export logic along the way.
 4. **Split and fade in / fade out** — clip-level editing beyond move/trim.
    Split was already done before this bullet was last updated
    (`useScissorsSplit.ts` + `ClipActionsOverlay.tsx`'s "Split" menu item).
@@ -702,6 +704,84 @@ Not built (disclosed): per-clip curve-shape picker (fixed to linear for v1,
 see the type-mismatch note above), any way to type an exact fade duration
 (drag-only for v1).
 
+## Export (done)
+
+Full mixdown to a downloadable WAV, via an "Export" button next to "Upload
+clip". Full plan: `.claude/plans/` history from the session that built this —
+the short version below is what a future session actually needs.
+
+**Don't hand-roll an `OfflineAudioContext` mixdown** — `@waveform-playlist/
+browser` already ships one, at the `@waveform-playlist/browser/tone` subpath
+(not the main entry — easy to miss; this app's own dependency is already the
+right version, no bump needed). `useExportWav()` returns `{ exportWav,
+isExporting, progress, error }`; `exportWav(tracks, trackStates, options)`
+builds an offline Tone render (per-clip `Player → gain/fade → track volume/
+pan/mute → master → destination`, same shape as live playback) and hand-
+encodes the result to a WAV `Blob`, triggering a real browser download.
+Confirmed by reading `dist/tone.js` directly, not just the `.d.ts` — same
+discipline as everywhere else in this file.
+
+**Real bug found in the library's own export code**: `useExportWav`'s solo/
+mute filter (`renderOffline`'s `audibleTracks` check) doesn't match
+`TonePlayout.updateSoloMuting()`'s live-playback rule for one combination —
+a track that's both `soloed: true` and `muted: true`. Live playback: silent
+(soloing doesn't override a track's own mute). The library's export filter:
+audible. `utils/audibleTracks.ts`'s `audibleIndices()` reimplements the
+correct rule and pre-filters tracks before calling `exportWav`, always
+passing `{ muted: false, soloed: false }` for whatever survives — so the
+library's own filter never sees anything it could get wrong. Covered by an
+e2e regression test (`e2e/export.spec.ts`, "soloing an already-muted track
+still exports nothing").
+
+**Bigger discovery, found while wiring this up**: mute/solo/volume/pan
+button clicks *never reach this app's own state at all*. Confirmed by
+reading `@waveform-playlist/browser/dist/index.js`: those edits only bump
+the engine's internal `mixerVersion`, and `onTracksChange` (the only way
+engine changes reach `TimelineStage.tsx`/the Zustand store) is gated on
+`tracksVersion` instead — it never fires for mixer-only edits. The library
+tracks live mixer state in its own separate `trackStates` React state
+(exposed via `usePlaylistData().trackStates`), decoupled from the `tracks`
+prop entirely. Net effect: `TrackMeta.muted`/`.soloed`/`.volume`/`.pan` in
+`present` are dead fields — always whatever they were at track creation,
+never updated by the UI. **Not fixed** (out of scope for export — this
+predates it and likely also means mute/solo/volume/pan don't survive a
+reload; see "Known limitations"). Export sidesteps it by reading
+`usePlaylistData().tracks`/`.trackStates` directly (the live engine state)
+instead of `present`, rather than trusting the app's own stale copy.
+
+**No progress bar** — `useExportWav`'s `progress` value only fires at three
+fixed checkpoints (0.1 at render start, 0.9 after render, 1.0 after encode),
+not continuously (`OfflineAudioContext.render()` exposes no progress events).
+A percentage sat visibly unmoving for the whole export, which read as a hang
+rather than a working busy-state — tried once, reverted. `ExportButton.tsx`
+just shows "Exporting…"/disabled, no number.
+
+**Files**: `utils/audibleTracks.ts` (solo/mute rule above),
+`hooks/useProjectExport.ts` (thin wrapper: filters via `audibleIndices`,
+builds a `podcast-export-<timestamp>.wav` filename, calls `exportWav`),
+`components/transport/ExportButton.tsx`, wired through
+`EditorShell.tsx`/`TransportControls.tsx` the same way `playPendingRef`/
+`activeTrackIdRef` already are. `EditorShell.tsx`'s existing rebuild-guard
+div (disables the transport bar while `!isReady`) now also gates on
+`isExporting` — an offline render temporarily swaps Tone's global context
+(`setContext`/restored in `finally`), so editing or playing mid-export is
+closed off the same way the two other Tone-context races in this file
+already are, rather than relying on it being provably safe.
+
+Committed coverage (`e2e/export.spec.ts`, 5 tests): download + duration
+match the timeline, transport bar disables during export, muting the only
+track surfaces an error instead of downloading silence, the soloed+muted
+regression above, and a fade-in audibly ramping up in the exported PCM.
+Full suite (33 tests) passed against a fresh prod build, plus a manual
+real-browser pass (mute, solo, solo+mute, fade, busy-state, console-error
+check) with a headless-Chromium script — all matched expectations, zero
+console errors.
+
+Not built (disclosed): MP3/other formats (WAV only — all the library
+supports), per-track export (`exportWav`'s `mode: 'individual'` exists and
+works, just not wired to any UI yet), 32-bit float output (`bitDepth` option
+exists, defaulted to 16-bit).
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -1044,3 +1124,16 @@ limitations" below for the trade-offs this brings.
   shape is also fixed to `"linear"` for v1 — no per-clip picker yet, though
   the field already round-trips through undo/redo and persistence, so
   adding one later doesn't touch either.
+- **Mute/solo/volume/pan clicks never update this app's own state** — see
+  "Export" above for the full trace (confirmed via the vendored dist
+  source). They work live (the library tracks them internally) but almost
+  certainly don't survive a reload or count as undo/redo steps, since
+  `present`'s copies of those fields are never touched. Export works around
+  it by reading the library's live state directly instead of fixing the
+  underlying gap — the fix would be making `TimelineStage.tsx` also mirror
+  `mixerVersion` changes back into the store, not attempted here.
+- **Export at this app's actual target scale (2-3 hour podcasts)** holds the
+  decoded source buffers, the rendered offline `AudioBuffer`, and the final
+  WAV `Blob` in memory simultaneously — a rough 3-hour stereo 16-bit render
+  is on the order of ~2GB for the Blob alone. Same unstress-tested-at-scale
+  risk the playback memory limitation above already flags, just compounded.
