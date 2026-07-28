@@ -27,9 +27,21 @@ import type { TrackMeta } from "../utils/types";
  * only the clips referencing the unresolved asset are dropped — leaving a
  * clip with no audioBuffer in the hydrated tracks would otherwise reach
  * WaveformPlaylistProvider broken, not just be visually wrong.
+ *
+ * That drop used to be console-only — real, silent data loss with nothing in
+ * the UI to indicate it, on a codepath (storage quota/eviction, private
+ * browsing) plausible at this app's actual target scale (2-3 hour podcasts,
+ * many large asset blobs). `hydrationWarning` surfaces the dropped-clip count
+ * so PodcastEditor.tsx can render it instead of relying on someone having the
+ * console open.
  */
-export function useProjectHydration(): { isProjectHydrating: boolean } {
+export function useProjectHydration(): {
+  isProjectHydrating: boolean;
+  hydrationWarning: string | null;
+  dismissHydrationWarning: () => void;
+} {
   const [isProjectHydrating, setIsProjectHydrating] = useState(true);
+  const [hydrationWarning, setHydrationWarning] = useState<string | null>(null);
   const replacePresent = useProjectStore((s) => s.replacePresent);
   // Guards against React Strict Mode's dev-only double-invoke of effects —
   // re-running this would re-decode every asset and call replacePresent a
@@ -73,10 +85,23 @@ export function useProjectHydration(): { isProjectHydrating: boolean } {
           })
         );
 
+        let droppedClipCount = 0;
         const hydratableTracks: TrackMeta[] = tracks.map((track) => ({
           ...track,
-          clips: track.clips.filter((clip) => decodedAssetIds.has(clip.assetId)),
+          clips: track.clips.filter((clip) => {
+            const kept = decodedAssetIds.has(clip.assetId);
+            if (!kept) droppedClipCount += 1;
+            return kept;
+          }),
         }));
+
+        if (droppedClipCount > 0) {
+          setHydrationWarning(
+            droppedClipCount === 1
+              ? "1 clip couldn't be restored — its audio data was missing or corrupted."
+              : `${droppedClipCount} clips couldn't be restored — their audio data was missing or corrupted.`
+          );
+        }
 
         replacePresent(hydratableTracks);
       } catch (err) {
@@ -90,5 +115,9 @@ export function useProjectHydration(): { isProjectHydrating: boolean } {
     })();
   }, [replacePresent]);
 
-  return { isProjectHydrating };
+  return {
+    isProjectHydrating,
+    hydrationWarning,
+    dismissHydrationWarning: () => setHydrationWarning(null),
+  };
 }

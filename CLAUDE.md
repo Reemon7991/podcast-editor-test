@@ -508,6 +508,41 @@ fixes in place (and separately, unmodified, against the reverted-fix
 baseline used for the measurement above, to confirm the baseline itself
 wasn't somehow already broken).
 
+### Post-Phase-3 review follow-ups (FIXED)
+
+A follow-up review of the Phase 3 + perf-fix code (not a new bug report,
+a deliberate re-check of "is this actually well implemented") found two
+more issues, both fixed in the same pass:
+
+- **The debounced save effect fired once, redundantly, after every single
+  app load.** `PodcastEditor.tsx`'s save effect is keyed on
+  `[past, isProjectHydrating]` — `isProjectHydrating` flipping false is
+  itself a dependency change, so the effect re-runs at exactly the moment
+  it stops early-returning, arming a save 500ms later regardless of whether
+  the user touched anything. On a fresh IndexedDB this created a `project`
+  record purely from opening the app once. Fixed with a `skipNextSaveRef`
+  ref (starts `true`, cleared the first time the effect runs post-hydration)
+  that skips exactly that one occurrence; any later real `past` change still
+  saves normally.
+- **A failed asset persist or a dropped-on-hydration clip was silent** —
+  console-only, with nothing in the UI. Both are real possibilities at this
+  app's actual target scale (2-3 hour podcasts, large asset blobs — real
+  storage-quota territory), and both meant a user could lose actual edited
+  work across a reload with zero indication anything went wrong.
+  `useTimelineTracks.ts`'s `addFilesToTrack` now counts `saveAsset` failures
+  per import batch and exposes `saveWarning`; `useProjectHydration.ts` counts
+  clips dropped for a missing/undecodable asset and exposes
+  `hydrationWarning`. `PodcastEditor.tsx` renders either as a dismissible
+  amber banner (`WarningBanner`) — same "surface it, don't just
+  console.warn" precedent `TimelineStage.tsx`'s red `providerError` banner
+  already established for a harder failure.
+
+Verified: `tsc --noEmit` and `eslint` clean; full suite (22 tests) passed
+against a fresh prod build (one pre-existing flaky retry on the corrupt-record
+test — the already-documented raw-`indexedDB.open()`-under-Playwright timing
+quirk two sections up, unrelated to this change, isolated in its own
+`describe` with `retries: 2`).
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime

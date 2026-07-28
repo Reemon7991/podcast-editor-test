@@ -17,9 +17,17 @@ import { saveProject } from "../utils/persistence";
 const SAVE_DEBOUNCE_MS = 500;
 
 export function PodcastEditor() {
-  const { tracks, addTrack, removeTrack, addFilesToTrack, isLoading } = useTimelineTracks();
+  const {
+    tracks,
+    addTrack,
+    removeTrack,
+    addFilesToTrack,
+    isLoading,
+    saveWarning,
+    dismissSaveWarning,
+  } = useTimelineTracks();
   const { duplicateClip, deleteClip } = useClipActions();
-  const { isProjectHydrating } = useProjectHydration();
+  const { isProjectHydrating, hydrationWarning, dismissHydrationWarning } = useProjectHydration();
 
   // Keyed on `past` (undo history), not `present`/`tracks` directly. `past`
   // only changes on a real history-pushing commit (commit/commitEngineOutput/
@@ -35,8 +43,20 @@ export function PodcastEditor() {
   // selectors staying in lockstep across renders.
   const past = useProjectStore((s) => s.past);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // `isProjectHydrating` flipping false is itself a dependency change, so
+  // without this guard the effect below re-runs (and arms a save) on the
+  // very transition where it stops early-returning — writing the
+  // just-loaded, unmodified project back to IndexedDB on every app load,
+  // even one where the user never touched anything. Skips exactly that one
+  // post-hydration occurrence; any later real `past` change still saves
+  // normally.
+  const skipNextSaveRef = useRef(true);
   useEffect(() => {
     if (isProjectHydrating) return;
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
       saveProject(useProjectStore.getState().present).catch((err) => {
@@ -71,6 +91,10 @@ export function PodcastEditor() {
 
   return (
     <div className="flex w-full flex-col gap-4">
+      {hydrationWarning && (
+        <WarningBanner message={hydrationWarning} onDismiss={dismissHydrationWarning} />
+      )}
+      {saveWarning && <WarningBanner message={saveWarning} onDismiss={dismissSaveWarning} />}
       <TimelineStage
         onRemoveTrack={handleRemoveTrackByIndex}
         deferEngineRebuild={isLoading}
@@ -79,6 +103,27 @@ export function PodcastEditor() {
         onDuplicateClip={duplicateClip}
         onDeleteClip={deleteClip}
       />
+    </div>
+  );
+}
+
+/** Dismissible inline banner for persistence-degradation warnings (dropped
+ *  clips on hydration, a failed asset save) — same "surface it in the UI,
+ *  don't just console.warn" precedent as TimelineStage.tsx's providerError
+ *  banner, amber rather than red since these are recoverable-this-session,
+ *  not fatal. */
+function WarningBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
+      <span>{message}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        className="shrink-0 text-amber-700 hover:text-amber-900 dark:text-amber-400 dark:hover:text-amber-200"
+      >
+        ✕
+      </button>
     </div>
   );
 }

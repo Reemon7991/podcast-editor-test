@@ -26,6 +26,12 @@ export function useTimelineTracks() {
   const tracks = useProjectStore((s) => s.present);
   const commit = useProjectStore((s) => s.commit);
   const [loadingCount, setLoadingCount] = useState(0);
+  // A saveAsset failure (quota, private browsing) used to be console-only —
+  // the clip still works this session (registerAsset already has the
+  // in-memory buffer), but silently won't survive a reload. Surfacing it lets
+  // PodcastEditor.tsx warn the user instead of them finding out via a missing
+  // clip after their next reload.
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
 
   const addTrack = useCallback(() => {
     commit((prev) => [...prev, createEmptyTrack(prev.length + 1)], "Add track");
@@ -61,6 +67,7 @@ export function useTimelineTracks() {
 
       (async () => {
         const audioContext = Tone.getContext().rawContext as AudioContext;
+        let assetSaveFailures = 0;
         const results = await Promise.allSettled(
           files.map(async (file) => {
             const arrayBuffer = await file.arrayBuffer();
@@ -73,17 +80,28 @@ export function useTimelineTracks() {
             // add-on to an already-working import path, so a save failure
             // (quota, private browsing) is logged and swallowed rather than
             // failing the import itself; the clip still works for this
-            // session, it just won't survive a reload.
+            // session, it just won't survive a reload. Counted (not just
+            // logged) so the caller can warn the user post-batch — see
+            // saveWarning's own doc comment.
             const [audioBuffer] = await Promise.all([
               audioContext.decodeAudioData(arrayBuffer),
               saveAsset(assetId, file).catch((err) => {
                 console.error("[podcast-editor] Failed to persist asset to IndexedDB", err);
+                assetSaveFailures += 1;
               }),
             ]);
             registerAsset(audioBuffer, assetId);
             return { file, audioBuffer, assetId };
           })
         );
+
+        if (assetSaveFailures > 0) {
+          setSaveWarning(
+            assetSaveFailures === 1
+              ? "1 clip couldn't be saved for offline use — it will be lost if you reload before exporting."
+              : `${assetSaveFailures} clips couldn't be saved for offline use — they will be lost if you reload before exporting.`
+          );
+        }
 
         commit(
           (prev) =>
@@ -136,5 +154,7 @@ export function useTimelineTracks() {
     removeTrack,
     addFilesToTrack,
     isLoading: loadingCount > 0,
+    saveWarning,
+    dismissSaveWarning: () => setSaveWarning(null),
   };
 }
