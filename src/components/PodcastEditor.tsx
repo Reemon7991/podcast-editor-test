@@ -5,6 +5,7 @@ import { TimelineStage } from "./timeline/TimelineStage";
 import { useTimelineTracks } from "../hooks/useTimelineTracks";
 import { useClipActions } from "../hooks/useClipActions";
 import { useProjectHydration } from "../hooks/useProjectHydration";
+import { useProjectStore } from "../store/projectStore";
 import { saveProject } from "../utils/persistence";
 
 /** Trailing-edge debounce for the persistence write — coalesces rapid
@@ -20,25 +21,32 @@ export function PodcastEditor() {
   const { duplicateClip, deleteClip } = useClipActions();
   const { isProjectHydrating } = useProjectHydration();
 
-  // Armed only once hydration completes — see the isProjectHydrating guard
-  // below — so the project `useProjectHydration` just loaded doesn't
-  // immediately re-trigger a redundant write back to the store it came from.
-  // While hydrating, PodcastEditor renders only the loading placeholder (no
-  // TimelineStage/EditorShell), so no user mutation can race replacePresent
-  // either.
+  // Keyed on `past` (undo history), not `present`/`tracks` directly. `past`
+  // only changes on a real history-pushing commit (commit/commitEngineOutput/
+  // undo/redo) — never on ClipDragLayer.tsx's updateEngineOutputLive, which
+  // updates `present` on every pointer-move frame of a trim drag to drive the
+  // live visual and deliberately never touches history (see
+  // projectStore.ts's own doc comment). Keying on `tracks` instead used to
+  // re-arm this effect on every one of those live-preview frames too — for a
+  // small session harmless, but for this app's actual target (2-3 hour
+  // podcasts, many tracks/clips) a trim drag paused for 500ms+ could trigger
+  // a full-session IndexedDB write mid-gesture. Reading `present` fresh
+  // inside the timeout (not the `tracks` closure) avoids depending on two
+  // selectors staying in lockstep across renders.
+  const past = useProjectStore((s) => s.past);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (isProjectHydrating) return;
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
-      saveProject(tracks).catch((err) => {
+      saveProject(useProjectStore.getState().present).catch((err) => {
         console.error("[podcast-editor] Failed to save project to IndexedDB", err);
       });
     }, SAVE_DEBOUNCE_MS);
     return () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
-  }, [tracks, isProjectHydrating]);
+  }, [past, isProjectHydrating]);
 
   // WaveformPlaylistProvider's onRemoveTrack gives a track *index* (it's a
   // Waveform-level UI callback, not aware of our id-keyed state) — resolve it

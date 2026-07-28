@@ -37,6 +37,16 @@ export function hydrate(tracks: TrackMeta[]): ClipTrack[] {
   return tracks.map(hydrateTrack);
 }
 
+const dehydratedTrackCache = new WeakMap<ClipTrack, TrackMeta>();
+
+function dehydrateTrack(track: ClipTrack): TrackMeta {
+  const cached = dehydratedTrackCache.get(track);
+  if (cached) return cached;
+  const dehydrated: TrackMeta = { ...track, clips: track.clips.map(dehydrateClip) };
+  dehydratedTrackCache.set(track, dehydrated);
+  return dehydrated;
+}
+
 function dehydrateClip(clip: AudioClip): ClipMeta {
   const { audioBuffer, ...rest } = clip;
   // Every clip that reaches dehydrate() in this app originates from
@@ -57,8 +67,23 @@ function dehydrateClip(clip: AudioClip): ClipMeta {
   return { ...rest, assetId };
 }
 
-/** Strips decoded audio back out to the persisted/undo-safe shape, resolving
- *  each clip's `assetId` from the registry it was registered under. */
+/**
+ * Strips decoded audio back out to the persisted/undo-safe shape, resolving
+ * each clip's `assetId` from the registry it was registered under.
+ *
+ * Per-track memoized (see `dehydratedTrackCache` above), same as `hydrate()`
+ * — load-bearing for trim's live preview, not just an optimization: a
+ * boundary drag's `onDragMove` (confirmed in
+ * `@waveform-playlist/browser/dist/index.js`) rebuilds only the *one* track
+ * containing the trimmed clip on every pointer-move frame and returns every
+ * sibling track by the same object reference — so without this cache,
+ * `dehydrate()` was re-processing every clip in the whole session on every
+ * frame of every trim, not just the one clip actually changing. Harmless for
+ * a small session; for this app's actual target (2-3 hour podcasts, many
+ * tracks/clips), that made trimming visibly heavier than before this
+ * boundary existed. With the cache, only the changed track's clips get
+ * re-mapped per frame — everything else is an O(1) WeakMap hit.
+ */
 export function dehydrate(tracks: ClipTrack[]): TrackMeta[] {
-  return tracks.map((track) => ({ ...track, clips: track.clips.map(dehydrateClip) }));
+  return tracks.map(dehydrateTrack);
 }

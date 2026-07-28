@@ -435,6 +435,79 @@ against a fresh prod build.
 Not built (disclosed, matches the original plan's "not in scope"): asset
 garbage collection, multi-tab sync, persisting undo history itself.
 
+### Post-Phase-3 perf regression: trimming got heavier on large sessions (FIXED, measured)
+
+Reported after Phase 3 landed: trimming felt noticeably heavier than before
+this whole layer existed, specifically on this app's actual target (2-3 hour
+podcasts, many tracks/clips) — not reproducible on the small 1-2 clip
+sessions used to verify Phases 1-3, which is exactly why it wasn't caught
+earlier. Two distinct causes, found by reading the library's own drag-move
+implementation directly (`@waveform-playlist/browser/dist/index.js`'s
+`onDragMove`), each independently confirmed by measurement (not just code
+review) before being written up here:
+
+- **`dehydrate()` was re-processing every clip in the whole session on every
+  pointer-move frame of every trim drag**, not just the one clip actually
+  changing. `ClipDragLayer.tsx`'s live-preview path
+  (`updateEngineOutputLive`) calls `dehydrate(raw)` on each frame; confirmed
+  in the library's `onDragMove` that a boundary (trim) drag rebuilds only the
+  *one* track containing the trimmed clip each frame and returns every
+  sibling track by the same object reference — the exact same reference-
+  stability property Phase 1's `hydrate()` per-track cache already relies on,
+  just never extended to `dehydrate()`. Fixed by adding the same per-track
+  `WeakMap` memoization to `dehydrate()` (`utils/clipHydration.ts`'s
+  `dehydratedTrackCache`). Only affects trim — the one gesture with a
+  live-preview dehydrate path (the library's own `onDragMove` bails out early
+  for non-boundary drags, confirmed by reading it) — plain clip moves commit
+  once at drag-end with no per-frame cost, matching that this was reported
+  specifically for trimming, not dragging.
+- **A regression in Phase 3's own code**: `PodcastEditor.tsx`'s debounced
+  auto-save effect depended on `present` directly, which changes on every one
+  of those same live-preview frames — a trim paused for 500ms+ mid-gesture
+  could trigger a full-session IndexedDB write mid-drag. Fixed by keying the
+  effect on `past` (undo history) instead: `past` only changes on a real
+  history-pushing commit (`commit`/`commitEngineOutput`/`undo`/`redo`), never
+  on `updateEngineOutputLive`, so the debounce no longer re-arms during a live
+  drag at all — it fires once, after the gesture settles.
+
+**Measured, not just reasoned about**: temporarily instrumented
+`dehydrateClip` with a call counter, built an 8-track × 6-clip (47 total
+clips) synthetic session via the real upload UI, and drove one trim gesture
+with the same `page.mouse.move({steps})` pattern the committed drag tests
+use. With the fix: **306 total `dehydrateClip` calls across the drag, ~6.8
+per frame** — matching the trimmed track's own 6 clips. With the fix
+reverted (same session, same drag): **2112 calls, ~46.9 per frame** —
+matching the whole 47-clip session. Confirms the fix and quantifies it: ~7x
+fewer clip-object rebuilds per frame at this session size, a ratio that
+widens with track count for the app's actual target of much larger
+real-world sessions. Instrumentation was temporary (added, measured against
+both the fixed and reverted code, then fully removed) — not committed.
+
+Audited for other instances of the same class of bug (something scaling with
+whole-session size on a per-frame or per-render basis) and found none:
+`hydrate()`'s own per-render call in `TimelineStage.tsx` was already
+per-track memoized since Phase 1; `deepEqual`/`cloneTracks`/history array
+copies in `projectStore.ts` all run once per *settled* commit, never per
+drag frame; `useScissorsSplit.ts`'s preview line is local component state
+that never touches the store; plain clip moves have no live-preview path at
+all (confirmed above); `saveProject` only serializes small JSON-safe
+metadata (no audio) and, after the fix above, only runs once per settled
+commit.
+
+Also fixed in the same pass, found only because it started producing
+thousands of lines of noise once a local `playwright-report/` existed on
+disk: `eslint.config.mjs`'s `globalIgnores` didn't exclude
+`playwright-report/**`/`test-results/**` (both already gitignored, but
+ESLint doesn't consult `.gitignore` on its own) — a bare `eslint .` after
+running the suite locally would lint Playwright's own minified report/trace
+assets. Added both to `globalIgnores` alongside the existing `.next/**`
+entry.
+
+Verified: full suite (22 tests) passed against a fresh prod build with both
+fixes in place (and separately, unmodified, against the reverted-fix
+baseline used for the measurement above, to confirm the baseline itself
+wasn't somehow already broken).
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime

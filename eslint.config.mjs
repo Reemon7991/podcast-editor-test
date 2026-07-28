@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Playwright's own generated output — not source, and its minified
+    // report/trace assets produce thousands of lint warnings if scanned.
+    "playwright-report/**",
+    "test-results/**",
   ]),
 ]);
 

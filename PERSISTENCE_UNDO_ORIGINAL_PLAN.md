@@ -403,9 +403,16 @@ correct by inspection, not provably safe from an automated pass alone, since
 both were already established as unreproducible under Playwright even with
 throttling.
 
-### Phase 3 — IndexedDB persistence + initial-load rehydration
+### Phase 3 — IndexedDB persistence + initial-load rehydration (done)
 
-`idb` schema (`audio-engine/persistence/persistence.ts`), DB `editor-pro` v1, two stores:
+**Status: implemented and committed.** File locations reflect the current
+structure directly (`utils/persistence.ts`, `hooks/useProjectHydration.ts`) —
+unlike Phase 1/2, Phase 3 was implemented entirely after the project-wide
+restructuring, so it never used the `audio-engine/persistence/` paths this
+sketch originally had. See CLAUDE.md's "Persistence + Undo/Redo layer" →
+"Phase 3" for full detail.
+
+`idb` schema (`utils/persistence.ts`), DB `editor-pro` v1, two stores:
 - `project` — single fixed-key record: `{ schemaVersion: 1, tracks: TrackMeta[], updatedAt }`.
   Only the current `present` snapshot — **not** `past`/`future` (undo history doesn't
   need to survive a reload; keeps the record small and sidesteps any asset-GC-vs-
@@ -422,8 +429,8 @@ Functions: `saveProject(tracks)`, `loadProject()`, `saveAsset(assetId, blob)`,
 `loadAsset(assetId)`, `loadAssets(assetIds: string[])` (batched parallel read).
 
 New files:
-- `audio-engine/persistence/persistence.ts` — as above.
-- `audio-engine/persistence/useProjectHydration.ts` — mount-time effect: `loadProject()` →
+- `utils/persistence.ts` — as above.
+- `hooks/useProjectHydration.ts` — mount-time effect: `loadProject()` →
   collect every distinct `assetId` referenced by any clip → `loadAssets(...)` →
   `decodeAudioData` each blob → `registerAsset(buffer, assetId)` (the persisted id
   — critical, minting a fresh one here would orphan every `ClipMeta.assetId`) →
@@ -432,7 +439,7 @@ New files:
   record) falls back to the default single-empty-track project and still flips
   `isProjectHydrating` false — never a permanent loading screen.
 
-Unchanged: `audio-engine/persistence/assetRegistry.ts` — Phase 1 already always calls
+Unchanged: `utils/assetRegistry.ts` — Phase 1 already always calls
 `registerAsset` with a known id (the content hash), so Phase 3's rehydration path
 is just a second caller of the same function with a different (persisted, not
 freshly-hashed) known id. No redesign needed here, unlike the first draft of this
@@ -440,15 +447,16 @@ plan which had assetRegistry minting ids itself and only optionally accepting a
 known one.
 
 Modified:
-- `audio-engine/useTimelineTracks.ts` — `addFilesToTrack` also calls
+- `hooks/useTimelineTracks.ts` — `addFilesToTrack` also calls
   `saveAsset(assetId, file)` right after hashing, before the original `File`
   would otherwise go out of scope post-decode.
 - `PodcastEditor.tsx` — mounts `useProjectHydration()`; shows a loading placeholder
   (same visual language as `PodcastEditorLoader`'s own dynamic-import loading state,
   for a consistent two-stage load) instead of `TimelineStage` while
   `isProjectHydrating` is true; mounts a debounced (~500ms trailing-edge) persistence
-  effect subscribed to `present`, armed only *after* hydration completes so the
-  just-loaded state doesn't immediately re-trigger a redundant write.
+  effect keyed on `past` (undo history), armed only *after* hydration completes so
+  the just-loaded state doesn't immediately re-trigger a redundant write — see
+  CLAUDE.md for why `past` rather than `present`.
 
 Debounce is about not issuing an IDB write per rapid action (e.g. holding undo) and
 avoiding overlapping in-flight writes — not about coalescing continuous input, since
@@ -458,18 +466,19 @@ import (deduped for free by content-addressing, see above), no debounce needed.
 
 **Interaction with `PodcastEditorLoader.tsx`**: unchanged — its `ssr:false` boundary
 exists purely for Tone.js's `window` touch at module-eval time. `idb`'s `openDB()`
-calls happen inside effects, not at module top-level, so no new SSR boundary is
-needed — but verify on first implementation that importing `idb` itself doesn't
+calls happen inside effects, not at module top-level, so no new SSR boundary was
+needed — confirmed `npm run build` stays clean and importing `idb` itself doesn't
 synchronously touch `window`/`indexedDB` at import time (same class of gotcha as
-the already-documented `styled-components` one).
+the already-documented `styled-components` one, just confirmed not to apply here).
 
-**Verify** (extends the Phase 0 suite): import files, drag, trim, undo once,
-`page.reload()`, confirm restored state matches and playback works. Also test a
-fresh IndexedDB (new browser context) still renders the default empty project
-without hanging, and that an injected failure in the hydration effect falls back
-correctly rather than spinning forever. Add the cross-upload-dedup assertion
-deferred from Phase 1: upload the same synthetic file twice, reload, and confirm
-only one record exists in the `assets` store for that content hash.
+**Verify: done, committed** (`e2e/persistence.spec.ts`, 4 tests): a fresh
+IndexedDB renders the default empty project without hanging; import → trim →
+reload restores the clip and playback still works; a corrupt persisted record
+falls back to the default project instead of hanging; the cross-upload-dedup
+case deferred from Phase 1 (upload the same file twice, confirm one `assets`
+record, confirm both clips survive a reload). Full suite (22 tests total: this
+file, `hydration.spec.ts`, `playback.spec.ts`, `undoRedo.spec.ts`) passed
+repeatedly against a fresh prod build.
 
 ## New dependencies
 
