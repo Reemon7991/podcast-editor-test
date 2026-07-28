@@ -14,6 +14,11 @@ export const SELECTORS = {
    *  data-boundary-edge="left"|"right" trim handles. */
   draggableClip: "[data-clip-id]:not([data-boundary-edge])",
   fileInput: 'input[type="file"]',
+  /** FadeHandles.tsx's draggable circles — only mounted while a clip is
+   *  hovered/fade-drag-locked (see ClipActionsOverlay.tsx), never present
+   *  in the DOM otherwise. */
+  fadeInHandle: '[data-fade-handle="in"]',
+  fadeOutHandle: '[data-fade-handle="out"]',
 } as const;
 
 /**

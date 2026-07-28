@@ -1,10 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { usePlaylistControls, usePlaylistData, useClipSplitting } from "@waveform-playlist/browser";
+import {
+  usePlaylistControls,
+  usePlaylistData,
+  usePlaybackAnimation,
+  useClipSplitting,
+} from "@waveform-playlist/browser";
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
+import { FadeHandles } from "./FadeHandles";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
+import { useFadeDragHandlers } from "../../hooks/useFadeDragHandlers";
 import { resolveClipAt, clipPixelWidth } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
 
@@ -26,11 +33,22 @@ interface ClipRef {
 interface ClipActionsOverlayProps {
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
+  /** Threaded through to useFadeDragHandlers — see its own doc comment and
+   *  transport/PlayButton.tsx / timeline/ClipDragLayer.tsx for the play()/
+   *  rebuild race this guards against. A fade-drag commit reaches
+   *  commitEngineOutput via the same unconditional-rebuild path a hand-
+   *  applied move does, so it needs the same guard. */
+  playPendingRef: RefObject<boolean>;
 }
 
 /**
- * Per-clip "..." actions menu (split/duplicate/delete), positioned over
- * whichever clip the pointer is currently on. The library's <Waveform> has
+ * Per-clip "..." actions menu (split/duplicate/delete) AND the fade-in/
+ * fade-out drag handles (FadeHandles.tsx), both positioned over whichever
+ * clip the pointer is currently on. Fade handles reuse this file's existing
+ * hover-tracking (`active`/`activeTrack`/`activeClip`/`left`/`width`) rather
+ * than running a second mousemove listener — see `fadeDragLockedFor`'s own
+ * comment below for why the sticky-lock addition is load-bearing, not
+ * cosmetic. The library's <Waveform> has
  * no slot for custom per-clip UI — its Clip/ClipHeader components render a
  * fixed layout with no children/render-prop escape hatch (confirmed by
  * reading @waveform-playlist/ui-components' Clip.tsx) — so this reimplements
@@ -64,15 +82,25 @@ interface ClipActionsOverlayProps {
  *     gets you to the menu without a long scroll, scissors mode is still
  *     how you pick exactly where to cut.
  */
-export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipActionsOverlayProps) {
-  const { tracks, samplesPerPixel, timeScaleHeight, sampleRate, isReady, isDraggingRef, playoutRef } =
-    usePlaylistData();
-  const { scrollContainerRef } = usePlaylistControls();
+export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingRef }: ClipActionsOverlayProps) {
+  const {
+    tracks,
+    samplesPerPixel,
+    timeScaleHeight,
+    sampleRate,
+    isReady,
+    isDraggingRef,
+    playoutRef,
+    onTracksChange,
+  } = usePlaylistData();
+  const { scrollContainerRef, stop } = usePlaylistControls();
+  const { isPlaying } = usePlaybackAnimation();
   const { splitClipAt } = useClipSplitting({ tracks, samplesPerPixel, engineRef: playoutRef });
 
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const [hovered, setHovered] = useState<ClipRef | null>(null);
   const [menuOpenFor, setMenuOpenFor] = useState<ClipRef | null>(null);
+  const [fadeDragLockedFor, setFadeDragLockedFor] = useState<ClipRef | null>(null);
   const [viewport, setViewport] = useState({ scrollLeft: 0, clientWidth: 0 });
 
   const scissors = useScissorsSplit({
@@ -83,6 +111,38 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipAction
     timeScaleHeight,
     sampleRate,
     splitClipAt,
+  });
+
+  // The mousemove hover-tracking effect below already nulls `hovered` out
+  // for the whole gesture whenever isDraggingRef.current is true — a signal
+  // shared with trim/move drags, and now also set by useFadeDragHandlers.ts
+  // for the fade-drag's own duration. That's fine *during* the drag
+  // (fadeDragLockedFor keeps `active` pinned instead), but nothing
+  // naturally repopulates `hovered` once the drag ends unless a real
+  // mousemove happens afterward — invisible for a *committed* fade (the
+  // resulting rebuild remounts this whole subtree anyway, resetting local
+  // state), but real for an Escape-cancelled one (no rebuild, so no
+  // remount): without restoring `hovered` here, the "…" button and fade
+  // handles would silently vanish the instant Escape is pressed, staying
+  // gone until the user moves the mouse again.
+  const handleFadeDragLockChange = useCallback((locked: ClipRef | null) => {
+    setFadeDragLockedFor((prevLocked) => {
+      if (locked === null && prevLocked !== null) {
+        setHovered(prevLocked);
+      }
+      return locked;
+    });
+  }, []);
+
+  const fadeDrag = useFadeDragHandlers({
+    tracks,
+    samplesPerPixel,
+    onTracksChange,
+    isDraggingRef,
+    playPendingRef,
+    isPlaying,
+    stop,
+    onDragLockChange: handleFadeDragLockChange,
   });
 
   // scrollContainerRef.current is only assigned by <Waveform>'s own ref
@@ -175,7 +235,13 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipAction
     );
   }
 
-  const active = menuOpenFor ?? hovered;
+  // fadeDragLockedFor keeps `active` pinned to the clip being fade-dragged
+  // for the whole gesture — load-bearing, not cosmetic: without it, a fast
+  // drag whose pointer momentarily leaves this clip's hover hit-test would
+  // fall through to `hovered` (possibly null), unmounting <FadeHandles>
+  // mid-gesture and tearing down useFadeDragHandlers.ts's window listeners
+  // while the mouse button is still held.
+  const active = menuOpenFor ?? fadeDragLockedFor ?? hovered;
   const activeTrack = active ? tracks[active.trackIndex] : undefined;
   const activeClip = active ? activeTrack?.clips[active.clipIndex] : undefined;
 
@@ -234,19 +300,32 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip }: ClipAction
   ];
 
   return createPortal(
-    <ClipActionsMenu
-      key={activeClip.id}
-      actions={actions}
-      style={{
-        position: "absolute",
-        left: buttonLeft,
-        top: buttonTop,
-        width: BUTTON_SIZE,
-        height: BUTTON_SIZE,
-        zIndex: 200,
-      }}
-      onOpenChange={(open) => setMenuOpenFor(open ? active : null)}
-    />,
+    <>
+      <ClipActionsMenu
+        key={activeClip.id}
+        actions={actions}
+        style={{
+          position: "absolute",
+          left: buttonLeft,
+          top: buttonTop,
+          width: BUTTON_SIZE,
+          height: BUTTON_SIZE,
+          zIndex: 200,
+        }}
+        onOpenChange={(open) => setMenuOpenFor(open ? active : null)}
+      />
+      <FadeHandles
+        trackIndex={active.trackIndex}
+        clipIndex={active.clipIndex}
+        clip={activeClip}
+        left={left}
+        width={width}
+        top={top + CLIP_HEADER_HEIGHT_PX}
+        samplesPerPixel={samplesPerPixel}
+        dragging={fadeDrag.dragging}
+        onStartDrag={fadeDrag.startDrag}
+      />
+    </>,
     scrollEl
   );
 }

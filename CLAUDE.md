@@ -13,7 +13,8 @@ end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
 the concrete gaps still open (export; undo/redo and persistence are both done
 — see "Persistence + Undo/Redo layer" below — including a committed test
-suite, though so far scoped to that layer, not the rest of the app).
+suite, so far scoped to that layer and to fade in/out — see "Fade in/out"
+below — not the rest of the app).
 Every non-obvious decision below exists because of something concretely
 discovered while building this, not speculation — treat this file as the
 fastest way to avoid re-deriving that work in a future session.
@@ -64,12 +65,12 @@ those two; the AI features are the most speculative and probably last).
    the user can download. Currently the editor can only play back in-browser;
    there's no way to get audio out of it at all.
 4. **Split and fade in / fade out** — clip-level editing beyond move/trim.
-   The library's `Clip` props already include `fadeIn`/`fadeOut` fields and a
-   `showFades` flag (see the peaks-rendering code referenced in "Clip
-   moves") — we just never enable it (`<Waveform>` is rendered without
-   `showFades` in `EditorShell.tsx`). Worth checking how much of the
-   rendering side the library already covers before building fade UI from
-   scratch.
+   Split was already done before this bullet was last updated
+   (`useScissorsSplit.ts` + `ClipActionsOverlay.tsx`'s "Split" menu item).
+   **Fade in/out is now done too** — see "Fade in/out" below for the actual
+   design, including why every committed fade edit forces a full engine
+   rebuild (no engine-native fade primitive exists, unlike trim) and the
+   real bugs found building it.
 5. **Audio effects** — per-clip or per-track processing (EQ, compression,
    gain automation, etc. — scope not yet defined).
 6. **AI features** — noise removal, humming removal, silence removal.
@@ -93,12 +94,14 @@ src/
       PlaybackTime.tsx                     live time display, registerFrameCallback-driven (NOT React state)
       DurationLabel.tsx                    total duration display
     clip-menu/
-      ClipActionsOverlay.tsx               per-clip "..." menu (split/duplicate/delete), positioned over whichever clip the pointer is on
+      ClipActionsOverlay.tsx               per-clip "..." menu (split/duplicate/delete) AND fade-in/fade-out handles, positioned over whichever clip the pointer is on — see "Fade in/out" below
       ClipActionsMenu.tsx                  generic "..." trigger + dropdown, reusable beyond clips
+      FadeHandles.tsx                      draggable fade-in/fade-out circles — see "Fade in/out" below
   hooks/
     useTimelineTracks.ts                   tracks[] as persisted state; addTrack/removeTrack/addFilesToTrack(trackId, files, insertionTimeSeconds)
     useClipActions.ts                      duplicate/delete clip mutations
     useScissorsSplit.ts                    "click a clip to choose a split point" mode
+    useFadeDragHandlers.ts                 fade-handle drag mechanics — see "Fade in/out" below
   utils/
     trackLayout.ts                         TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
     clipGeometry.ts                        pixel↔sample hit-testing shared by ClipActionsOverlay/useScissorsSplit/ClipDragLayer
@@ -543,6 +546,162 @@ test — the already-documented raw-`indexedDB.open()`-under-Playwright timing
 quirk two sections up, unrelated to this change, isolated in its own
 `describe` with `retries: 2`).
 
+## Fade in/out (done)
+
+Small draggable circle handles at each clip's fade corners — drag inward/
+outward to set fade-in/fade-out duration. Built after a UX-alignment pass
+with the user (drag handles, not a menu; one fixed curve shape for v1;
+hover-revealed) and a verification pass against the actual
+`@waveform-playlist/*` vendor source, same discipline as every other feature
+in this file.
+
+**The one finding that shapes the whole design**: `@waveform-playlist/engine`'s
+public API only exposes `splitClip`/`trimClip`/`moveClip` — no engine-native
+fade primitive exists (confirmed by reading its `.d.ts`). The provider's
+rebuild-avoidance check (`browser/dist/index.js`, see "Confirmed library
+behavior" above for the exact logic) only skips a full Tone.js dispose+rebuild
+when `tracks === engineTracksRef.current` (true only right after a real
+`engine.trimClip()` + `commitTransaction()`) or while `isDraggingRef.current`
+is true (true only during the library's own boundary-drag gesture). A fade
+edit is neither — it's a hand-built `ClipTrack[]`, exactly like a completed
+clip **move** — so **every committed fade edit forces one full engine
+rebuild**, the same "Building waveform…" flash a move already causes. Not
+fixable by faking `isDraggingRef` to suppress the rebuild: that would leave
+the live Tone.js engine still playing the *old* fade values with no way to
+tell it otherwise — a worse, silent bug than the rebuild cost. Confirmed this
+isn't an accidental slowdown, not just reasoned about: a direct measurement
+(`page.mouse` drag + `waveform-playlist:ready` timing, small single-clip
+session) showed a fade commit's rebuild at **68ms**, actually *faster* than a
+plain clip move's **337ms** in the same run — the cost is the same class as
+every other non-engine-native mutation already has, proportional to session
+size, not something fade-specific to optimize away.
+
+That one fact also rules out reusing trim's live-preview store machinery
+(`updateEngineOutputLive`/`dragBaseline`): routing every mousemove through
+the store would put a fresh, non-rebuild-avoidable tracks array in front of
+the provider on *every frame* — far worse than one rebuild per completed
+gesture. So the drag's live preview is **entirely local hook state, never
+touching `store/projectStore.ts`** — the real commit happens once, at
+mouseup. No store changes were needed anywhere in this feature.
+
+**Second vendor gotcha, found by reading both sides**: `@waveform-playlist/core`'s
+own `Fade` type interface documents its default curve as `'linear'`, and
+`@waveform-playlist/playout`'s `scheduleFades` defaults an omitted `type` to
+`"linear"` — while `ui-components`' `FadeOverlay` (the curve-drawing
+component) defaults to `"logarithmic"`. Leaving `type` unset on a created
+`Fade` object would make the drawn curve and the audible envelope mismatch.
+`useFadeDragHandlers.ts`'s `FADE_CURVE_TYPE` constant is always set
+explicitly for exactly this reason — currently `"linear"` (the user's choice
+after trying it; trivial to change later since it's one constant, and the
+curve shape already round-trips through undo/redo and persistence untouched
+since `ClipMeta` is `Omit<AudioClip, "audioBuffer">`).
+
+**Files**:
+- `hooks/useFadeDragHandlers.ts` — modeled on `useScissorsSplit.ts`'s shape
+  (raw `window` mousemove/mouseup/keydown listeners, no `@dnd-kit`; fade-
+  dragging is single-clip/single-axis with no cross-track or collision
+  logic, so nothing is gained by joining `ClipDragLayer.tsx`'s already-
+  complex dual-`DragDropProvider` machinery). On mouseup, mirrors
+  `ClipDragLayer.tsx`'s `onDragEnd` move-commit ordering exactly (`flushSync`
+  `stop()` if playing, then check `playPendingRef` before calling
+  `onTracksChange`) — a fade commit reaches `commitEngineOutput` via the same
+  unconditional-rebuild path a hand-applied move does, so `commit()`'s
+  centralized `stopIfPlaying` guard never runs for it; it needs the same
+  local guard `ClipDragLayer.tsx` already has.
+- `components/clip-menu/FadeHandles.tsx` — presentational, portaled
+  alongside the existing "…" button into the library's scroll container.
+  Handle position tracks the live drag locally; the vendor's own
+  `FadeOverlay` curve only updates once the drag commits and the rebuild
+  completes (see "double overlay" bug below for why this file doesn't try to
+  paper over that gap with its own preview shape).
+- `components/clip-menu/ClipActionsOverlay.tsx` — reuses its existing hover-
+  tracking (`active`/`activeTrack`/`activeClip`/`left`/`width`) rather than
+  running a second `mousemove` listener; adds a sticky `fadeDragLockedFor`
+  state (mirrors the existing `menuOpenFor` pattern) and a
+  `handleFadeDragLockChange` wrapper (see "hover vanishes after Escape" bug
+  below for why the latter is load-bearing, not cosmetic).
+- `components/timeline/EditorShell.tsx` — `showFades` added to the existing
+  `<Waveform>` call (one-line; `fadeIn`/`fadeOut`/`sampleRate` already flow
+  per-clip through `<Waveform>`/`<Clip>` internally); `playPendingRef`
+  threaded down into `<ClipActionsOverlay>` (new prop — the playback guard
+  above now lives in that subtree).
+- `app/globals.css` — a `[data-boundary-edge]::after` rule gives the
+  existing (vendor-rendered, already hover-revealed but previously
+  border-only) trim handles a more visible pill on hover. Pure CSS, no
+  vendor JS touched: `ClipBoundary`'s styled-components CSS reads no `theme`
+  prop (confirmed by reading its source, unlike `FadeOverlay`), so this was
+  the only way to change its look without patch-package.
+- No changes to `store/projectStore.ts` or `utils/clipHydration.ts` — both
+  already generic enough (`commitEngineOutput` already fans in trim/split/
+  move under one "Edit timeline" label with no special-casing; the per-track
+  `WeakMap` hydrate/dehydrate caches benefit automatically as long as the
+  commit's `tracks.map()` keeps every untouched sibling track by the same
+  object reference, which `useFadeDragHandlers.ts` does).
+
+**Real bugs found and fixed while building this** (each caught by actually
+using the feature, not by review alone):
+
+1. **`setState` called during another component's render.** The first
+   version of `endDrag` read the live preview value via `setDragging`'s own
+   updater-function `current` argument, then performed side effects
+   (`flushSync(stop())`, `onTracksChange?.(...)` — which flows into a
+   Zustand `set()` that updates `PodcastEditor`/`TimelineStage`) *inside*
+   that updater callback. Updater functions must be pure; triggering another
+   component's update from inside one produces exactly React's "Cannot
+   update a component while rendering a different component" warning
+   (reproduced once by an actual user of this app, after a fresh page load —
+   React tolerates it outside Strict Mode, so it doesn't always warn, but it
+   was a real latent bug). Fixed by mirroring the live value into
+   `dragMetaRef.current.previewDurationSamples` (updated in `handleMouseMove`
+   alongside the existing state update) so `endDrag` reads a plain ref value
+   and runs its commit logic as an ordinary side effect, with `setDragging`
+   reduced to a single, side-effect-free `setDragging(null)`.
+2. **Escape-cancelling a fade drag left the "…" button and fade handles
+   invisible until the next mouse movement.** `ClipActionsOverlay.tsx`'s own
+   hover-tracking effect already nulls `hovered` for the whole gesture
+   whenever `isDraggingRef.current` is true — a signal shared with trim/move
+   drags, and now also set by `useFadeDragHandlers.ts`. Fine *during* the
+   drag (`fadeDragLockedFor` keeps `active` pinned instead), but nothing
+   naturally repopulates `hovered` once the drag ends unless a real
+   mousemove happens afterward. Invisible for a *committed* fade (the
+   resulting rebuild remounts the whole `ClipDragLayer`/`ClipActionsOverlay`
+   subtree anyway, resetting all local state), but real for an
+   Escape-cancelled one (no rebuild, so no remount to reset anything).
+   Fixed: `handleFadeDragLockChange` restores `hovered` to the just-finished
+   clip when the lock clears, instead of leaving both `null`.
+3. **Two conflicting fade shapes visible at once when editing an
+   already-faded clip.** An earlier version of `FadeHandles.tsx` also drew a
+   local, translucent straight-line approximation of the fade region during
+   the drag, for live curve feedback (the vendor's own `FadeOverlay` curve
+   only updates post-commit — see the architecture note above). When the
+   clip already had a fade set, that local wedge and the vendor's real
+   (stale, pre-drag) curve were both visible simultaneously, at different
+   widths — read as two separate, conflicting shapes rather than one
+   smoothly updating one (reported directly by a user of this app). An
+   opaque-masking version (cover the stale curve with a `var(--background)`
+   box sized to the union of the old and live widths, draw the live wedge on
+   top) was tried and worked, but was reverted at the user's request in
+   favor of simplicity: **no custom preview shape at all** — the handle's
+   own live position is the only in-drag feedback, and the real curve
+   reappears (correctly, and alone) the instant the drag commits.
+
+Committed coverage (`e2e/fades.spec.ts`, 6 tests, following
+`hydration.spec.ts`/`undoRedo.spec.ts` conventions — real `page.mouse`
+sequences, not `dragTo()`; new `fadeInHandle`/`fadeOutHandle` selectors in
+`e2e/helpers.ts`): handles hidden by default, appear on hover; **dragging a
+fade handle rebuilds the engine** (the key architectural assertion — pins
+down the "always rebuilds, unlike trim" finding as a regression test, so a
+future session can't silently "fix" this into a visual/audio mismatch the
+way faking `isDraggingRef` would); a completed drag undoes in one step;
+Escape cancels without committing; dragging back to the corner clears the
+fade; the playback guard (drag while playing stops playback instead of
+crashing, mirroring the existing move/duplicate/undo tests). Full suite (28
+tests) passed repeatedly against a fresh prod build.
+
+Not built (disclosed): per-clip curve-shape picker (fixed to linear for v1,
+see the type-mismatch note above), any way to type an exact fade duration
+(drag-only for v1).
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -876,3 +1035,12 @@ limitations" below for the trade-offs this brings.
   *structural/rendering* scalability, not real memory footprint at ~1hr of
   actual audio content — that's the next thing to stress-test for real
   before trusting this architecture at production scale.
+- **Every committed fade edit triggers a full engine rebuild**, same as a
+  clip move — see "Fade in/out" above for why (no engine-native fade
+  primitive exists in `@waveform-playlist/engine`). Repeatedly nudging a
+  fade handle to fine-tune it costs one rebuild per release, same class of
+  cost a repeatedly-nudged clip move already has; not specific to fades and
+  not fixable from this app without an upstream engine change. Fade curve
+  shape is also fixed to `"linear"` for v1 — no per-clip picker yet, though
+  the field already round-trips through undo/redo and persistence, so
+  adding one later doesn't touch either.

@@ -167,9 +167,13 @@ export function EditorShell({
               ref={waveformContainerRef}
               onPointerDown={handleWaveformPointerDown}
             >
-              <Waveform showClipHeaders onRemoveTrack={onRemoveTrack} />
+              <Waveform showClipHeaders showFades onRemoveTrack={onRemoveTrack} />
             </div>
-            <ClipActionsOverlay onDuplicateClip={onDuplicateClip} onDeleteClip={onDeleteClip} />
+            <ClipActionsOverlay
+              onDuplicateClip={onDuplicateClip}
+              onDeleteClip={onDeleteClip}
+              playPendingRef={playPendingRef}
+            />
             <div className="flex w-[180px] justify-center border-t border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900">
               <button
                 type="button"
