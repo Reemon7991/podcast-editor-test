@@ -25,15 +25,15 @@ fastest way to avoid re-deriving that work in a future session.
    zoom, scroll, time display) — done, verified.
 2. Multi-clip single-track timeline (import multiple files via "Upload clip",
    inserted back-to-back starting at the current playhead position into the
-   active track; play as one continuous timeline) — done; verified for the
-   original append-at-end/gap design, **not yet re-verified** for the current
-   insert-at-playhead behavior (see `useTimelineTracks.addFilesToTrack`) —
-   treat that specific insertion path as untested until it's exercised
-   end-to-end.
+   active track, pushed forward past an occupied spot instead of overlapping
+   — see "Uploading onto an occupied playhead position no longer overlaps"
+   below; play as one continuous timeline) — done, verified end-to-end.
 3. Multi-track + clip dragging (multiple tracks, drag clips horizontally
-   within a track, drag clips vertically to another track, drop anywhere
-   including on top of another clip — overlap is intentional, see "Superseded
-   issue" below) — implemented; remaining known issues tracked in
+   within a track, drag clips vertically to another track) — drops are
+   blocked from overlapping a neighbor; a same-track drop where the pointer
+   lands directly on one immediate neighbor offers a swap via a confirmation
+   popover instead of blocking (see "Clip swap confirmation" below) —
+   implemented; remaining known issues tracked in
    `timeline/EditorShell.tsx`'s own doc comment (the scroll-reset-on-rebuild
    history, including a real vendored-library bug found along the way that
    is diagnosed but **not actually patched** — no `patch-package` setup or
@@ -91,6 +91,7 @@ src/
       TimelineStage.tsx                    wraps WaveformPlaylistProvider (tracks, onTracksChange, controls)
       EditorShell.tsx                      TransportControls + "New Track" button + ClipDragLayer(<Waveform showClipHeaders/>); also does manual track-click selection (see "Track selection" below)
       ClipDragLayer.tsx                    custom drag interaction layer — see "Clip dragging" below
+      ClipSwapConfirmPopover.tsx           same-track swap confirmation — see "Clip swap confirmation" below
     transport/
       TransportControls.tsx                PlayButton/PauseButton/ZoomIn/ZoomOut (library components) + time + "Upload clip" file input + UndoRedoButtons (see "Persistence + Undo/Redo layer" below)
       PlaybackTime.tsx                     live time display, registerFrameCallback-driven (NOT React state)
@@ -106,7 +107,7 @@ src/
     useFadeDragHandlers.ts                 fade-handle drag mechanics — see "Fade in/out" below
   utils/
     trackLayout.ts                         TRACK_WAVE_HEIGHT + TRACK_ROW_HEIGHT_PX (empirically measured)
-    clipGeometry.ts                        pixel↔sample hit-testing shared by ClipActionsOverlay/useScissorsSplit/ClipDragLayer
+    clipGeometry.ts                        pixel↔sample hit-testing shared by ClipActionsOverlay/useScissorsSplit/ClipDragLayer; also resolveNonOverlappingStart, the shared collision-avoidance math for both uploads (useTimelineTracks.ts) and drag/drop (ClipDragLayer.tsx)
     types.ts, assetRegistry.ts,
     clipHydration.ts                       see "Persistence + Undo/Redo layer" below
   store/
@@ -888,6 +889,22 @@ decode all files in a batch concurrently (`Promise.allSettled`, still fast),
 but only commit to `tracks` state once, in one update, iterating in the
 *original* file-selection order.
 
+### Uploading onto an occupied playhead position no longer overlaps
+
+`addFilesToTrack` inserts a batch starting at the playhead, treating the
+whole batch as one span (summed duration of every file in it, so the batch
+stays contiguous with itself). `utils/clipGeometry.ts`'s
+`resolveNonOverlappingStart` walks the target track's existing clips in
+sorted order and pushes the batch's start forward past each one it
+overlaps — checked against the *already-pushed* candidate at each step, not
+just the original proposed position, so a push past a close clip can't land
+back on top of a farther one. Never pushes backward, never splits the batch
+across a gap. Reused as-is everywhere else a new clip position gets
+computed, rather than duplicating the math: `ClipDragLayer.tsx`'s drag/drop
+block-or-clamp path (see "Clip dragging" below) and
+`useClipActions.ts`'s `duplicateClip` (placed right after the source clip,
+pushed further if something was already sitting there).
+
 ### Clip dragging: `ClipInteractionProvider` alone isn't enough
 
 This was the most involved discovery. `ClipInteractionProvider` is the
@@ -922,13 +939,18 @@ control label, Mute button) across empty and populated tracks. Revisit this
 constant if `TRACK_WAVE_HEIGHT` or `showClipHeaders` usage changes.
 
 `constrainClipDrag` (from `@waveform-playlist/engine`) **is** publicly
-exported, and was originally reused directly here for collision-safety (same
-math `engine.moveClip()` uses internally, just applied to a track/position
-the clip isn't natively being moved through the engine for). It no longer is
-— `resolveDropPosition` dropped that call entirely once free clip overlap
-became the intended behavior; see "Superseded issue" further down. The rest
-of this section (cross-track target detection, `TRACK_ROW_HEIGHT_PX`) is
-still accurate and unaffected by that change.
+exported, but isn't imported anywhere in this file — it only examines the
+one immediate prev/next neighbor around a clip's proposed position, which
+isn't enough when a target track has 2+ clips and a drop needs to skip past
+more than one of them. Collision blocking instead uses
+`utils/clipGeometry.ts`'s `resolveNonOverlappingStart` (the same function
+`useTimelineTracks.ts`'s upload path uses, see "Uploading onto an occupied
+playhead position" above), which walks every existing clip on the target
+track in order rather than just whichever one ends up adjacent in a merged
+sort. See "Clip swap confirmation" below for the one same-track case that
+isn't a block/clamp at all (the pointer landing directly on an immediate
+neighbor offers a swap instead). The rest of this section (cross-track
+target detection, `TRACK_ROW_HEIGHT_PX`) is unaffected by any of this.
 
 ### Every accepted clip move forces a full engine rebuild — and `play()` can race it (FIXED)
 
@@ -1071,37 +1093,51 @@ signal). If picking this project back up:
   (the clip's header bar) — not the waveform `<canvas>`, and not the
   `data-boundary-edge="left"|"right"` trim handles.
 
-## Superseded issue — clip reorder-past-a-neighbor drag (RESOLVED, by design change)
+## Clip swap confirmation (same-track reorder-past-a-neighbor)
 
-This section used to track a bug where dragging a clip past an earlier
-neighbor would snap back instead of reordering, root-caused to
-`constrainClipDrag`'s collision math only allowing a reorder once the dragged
-clip's *entire* width cleared the neighbor. A swap-on-center-crossing fix
-(`resolveSameTrackMove`) was drafted but never implemented.
+Clip overlap is blocked by default everywhere in this app (drag or upload) —
+neither the original drag-start-anchored `engine.moveClip()` gap-sliding nor
+a later free-overlap-everywhere revision survived; both were superseded by
+what's described below. In `ClipDragLayer.tsx`:
 
-That whole approach is now moot: `resolveDropPosition` in `ClipDragLayer.tsx`
-no longer does any neighbor/collision math at all. Clips can be dropped
-anywhere, including fully overlapping another clip on the same track or a
-different one — this is an intentional product decision (smooth "place a clip
-wherever you want" UX), not a regression to fix. See `resolveDropPosition`'s
-and `ClipDragLayer`'s own doc comments for the reasoning, and "Known
-limitations" below for the trade-offs this brings.
+- Every drop is blocked from overlapping a neighbor by default
+  (`resolveNonOverlappingStart` — see "Clip dragging" above).
+- Exception: a **same-track** drop where the pointer, at release, is
+  literally resting on top of a single immediate neighbor
+  (`findSameTrackNeighborAtPointer`, hit-tested via `utils/clipGeometry.ts`'s
+  `resolveClipAt` against the raw drop coordinates — not whether the dragged
+  clip's own computed span happens to reach into a neighbor) defers the
+  commit and shows `ClipSwapConfirmPopover` instead of blocking. Confirming
+  swaps the two clips' positions (`computeSwapPositions` — contiguous, not a
+  naive `startSample` exchange, since durations can differ); declining (or
+  dismissing via Escape/outside-click, or clicking anywhere else) leaves the
+  clip exactly where it started, since nothing commits until confirmed.
+- Landing on a non-adjacent clip, or on genuinely empty space (even if the
+  dragged clip's own length would reach into a neighbor once placed there),
+  isn't a swap — both fall back to the plain block/clamp path.
+- Cross-track drops always just block/clamp, never offer a swap — there's no
+  "current neighbor" to swap with on a track the clip wasn't already on.
+- `confirmPendingSwap` re-looks-up both clips by id and re-checks they're
+  still each other's immediate neighbor before applying the swap (not "still
+  overlapping" — committed states never overlap), reading `pendingSwap` from
+  the closure rather than an updater-callback argument so the commit/
+  `flushSync` side effects run as ordinary function-body code, not from
+  inside a setState updater (same rule `useFadeDragHandlers.ts` already
+  documents). Guards against another commit (a second drag, duplicate/
+  delete, undo/redo) landing while the popover was open; an engine rebuild
+  while it's open unmounts `ClipDragLayer` entirely, discarding the pending
+  state for free.
+- The swap commit reuses the existing `commitEngineOutput` path unchanged —
+  it's undo-able in one step, same as every other hand-applied move, with
+  zero changes needed in `store/projectStore.ts`.
 
 ## Known limitations (disclosed, not silently accepted)
 
-- **Clip overlap is unconstrained by design** — dragging a clip (same-track or
-  cross-track) never blocks or clamps against a neighbor; it can land fully on
-  top of another clip. This is intentional (see "Superseded issue" above), not
-  a bug, but it has real trade-offs: (1) a fully-covered clip becomes
-  unclickable/untrimmable until the covering clip is moved away again (the
-  dropped clip is always appended last to its track's array, so it renders on
-  top and intercepts pointer events); (2) boundary trims still go through the
-  library's own untouched `engine.trimClip()`/`constrainBoundaryTrim`, which
-  computes its allowed range assuming the nearest sorted neighbor isn't
-  already overlapping — trimming a clip that's already overlapping another can
-  produce a smaller-than-dragged result (clamped by `minDuration` first). No
-  crash or corrupted state in either case, just unintuitive in that specific
-  combination.
+- **Same-track swap only reorders a single immediate neighbor pair** — by
+  design (see "Clip swap confirmation" above), not a limitation to fix.
+  Landing on a non-adjacent clip, or in empty space, falls back to
+  block/clamp with no swap offer; sequential drags cover multi-position
+  moves.
 - No undo/redo wiring for clip moves. Correction to an earlier note here:
   this applies to *every* accepted drop, not just reorders/cross-track —
   `onDragEnd` discards the engine's own in-flight transaction

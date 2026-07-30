@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, type ComponentProps, type ReactNode, type RefObject } from "react";
+import { useCallback, useState, useRef, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import { DragDropProvider } from "@dnd-kit/react";
 import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
@@ -15,13 +15,25 @@ import {
 } from "@waveform-playlist/browser";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { dehydrate } from "../../utils/clipHydration";
+import { resolveNonOverlappingStart, resolveClipAt } from "../../utils/clipGeometry";
 import { useProjectStore } from "../../store/projectStore";
+import { ClipSwapConfirmPopover } from "./ClipSwapConfirmPopover";
 
 interface ClipSourceData {
   trackIndex: number;
   clipIndex: number;
   clipId: string;
   boundary?: "left" | "right";
+}
+
+interface PendingSwap {
+  trackId: string;
+  clipId: string;
+  neighborId: string;
+  side: NeighborSide;
+  clipName?: string;
+  neighborName?: string;
+  anchor: { x: number; y: number };
 }
 
 interface ClipDragLayerProps {
@@ -53,50 +65,76 @@ type DragEndEventArg = Parameters<OnDragEnd>[0];
 // this is a type-only mismatch in the library's .d.ts, not a runtime one.
 type LibraryDragHandler = (event: never) => void;
 
-/**
- * Where `clip` lands if dropped at `proposedStartSample`: clamped only to
- * not land before the timeline start (sample 0).
- *
- * Deliberately no neighbor/collision constraint here — this is not
- * engine.moveClip()'s approach (which restricts a clip to sliding within its
- * gap at drag-start and can never cross a neighbor). Clips are allowed to
- * land anywhere, including fully overlapping another clip on the same track,
- * so the user can place a clip wherever they want without fighting layout
- * constraints. Overlap is a supported end state, not a transient one: Tone.js
- * schedules each clip as its own independent buffer source, so overlapping
- * clips just mix together in playback — see CLAUDE.md for the verification
- * notes on this. The moved clip is always appended last to its track's
- * clips array (see onDragEnd below), so on overlap it renders on top.
- */
-function resolveDropPosition(
-  proposedStartSample: number
-): number {
-  return Math.max(0, Math.floor(proposedStartSample));
+type NeighborSide = "before" | "after";
+
+interface NeighborHit {
+  neighbor: AudioClip;
+  side: NeighborSide;
+}
+
+/** Same-track only: is the pointer, at drop, actually resting on top of one
+ *  of the dragged clip's immediate neighbors? Driven by where the pointer
+ *  landed (hitClipId, from resolveClipAt against the raw drop coordinates),
+ *  not by whether the clip's own computed span happens to reach into a
+ *  neighbor — dropping a long clip in genuinely empty space shouldn't count
+ *  as a swap just because the clip itself is long enough to overlap
+ *  something once placed there (resolveNonOverlappingStart's block/clamp
+ *  handles that case instead). A hit on a non-adjacent clip also falls
+ *  through to block/clamp — swap only makes sense for a genuine neighbor. */
+function findSameTrackNeighborAtPointer(
+  clip: AudioClip,
+  trackClips: AudioClip[],
+  hitClipId: string | null
+): NeighborHit | null {
+  if (!hitClipId || hitClipId === clip.id) return null;
+  const sorted = [...trackClips].sort((a, b) => a.startSample - b.startSample);
+  const idx = sorted.findIndex((c) => c.id === clip.id);
+  if (idx === -1) return null;
+  const prev = idx > 0 ? sorted[idx - 1] : null;
+  const next = idx < sorted.length - 1 ? sorted[idx + 1] : null;
+  if (prev && prev.id === hitClipId) return { neighbor: prev, side: "before" };
+  if (next && next.id === hitClipId) return { neighbor: next, side: "after" };
+  return null;
+}
+
+/** Swaps clip/neighbor, keeping them contiguous. Only touches these two. */
+function computeSwapPositions(
+  clip: AudioClip,
+  neighbor: AudioClip,
+  side: NeighborSide
+): { clipStart: number; neighborStart: number } {
+  if (side === "before") {
+    const clipStart = neighbor.startSample;
+    return { clipStart, neighborStart: clipStart + clip.durationSamples };
+  }
+  const neighborStart = clip.startSample;
+  return { clipStart: neighborStart + neighbor.durationSamples, neighborStart };
 }
 
 /**
- * Enables clip dragging with cross-track support and free placement within
- * a track — including on top of another clip. This is intentional: dropped
- * clips are never pushed apart or blocked by a neighbor, so the user can
- * place a clip anywhere without fighting collision constraints. See
- * resolveDropPosition's doc comment for why overlap is safe to allow.
+ * Enables clip dragging with cross-track support. Drops are blocked from
+ * overlapping a neighbor (resolveNonOverlappingStart, utils/clipGeometry.ts —
+ * shared with the upload-at-playhead path in useTimelineTracks.ts), except a
+ * same-track drop where the pointer lands directly on one immediate
+ * neighbor, which offers a swap via ClipSwapConfirmPopover instead
+ * (findSameTrackNeighborAtPointer).
  *
  * The library's own ClipInteractionProvider is a turnkey drag layer, but it
  * unconditionally applies a horizontal-axis restriction, and its onDragEnd
- * delegates to engine.moveClip() — which, as above, only lets a clip slide
- * within its current gap and has no cross-track primitive at all. Whether a
- * clip renders as draggable is gated by an internal context flag that only
+ * delegates to engine.moveClip() — which only lets a clip slide within its
+ * current gap and has no cross-track primitive at all. Whether a clip
+ * renders as draggable is gated by an internal context flag that only
  * ClipInteractionProvider can set (it isn't exported), so we keep it mounted
  * for that side effect and nest our own DragDropProvider inside it.
  * Draggables always bind to the nearest DragDropProvider ancestor, so ours
  * takes over the actual interaction — ClipInteractionProvider's own outer
  * one ends up with nothing registered.
  *
- * Every clip *move* (same-track or cross-track) goes through
- * resolveDropPosition and is applied by reassigning the tracks array
- * directly via onTracksChange — the same "external update" path used
- * everywhere else in this app (import, remove, add track). Boundary trims
- * and cancelled drags are untouched and still delegate to the library.
+ * Every accepted clip *move/swap* (same-track or cross-track) is applied by
+ * reassigning the tracks array directly via onTracksChange — the same
+ * "external update" path used everywhere else in this app (import, remove,
+ * add track). Boundary trims and cancelled drags are untouched and still
+ * delegate to the library.
  */
 export function ClipDragLayer({ children, playPendingRef }: ClipDragLayerProps) {
   return (
@@ -109,11 +147,13 @@ export function ClipDragLayer({ children, playPendingRef }: ClipDragLayerProps) 
 }
 
 function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps) {
-  const { tracks, samplesPerPixel, playoutRef, isDraggingRef, onTracksChange } =
+  const { tracks, samplesPerPixel, timeScaleHeight, playoutRef, isDraggingRef, onTracksChange } =
     usePlaylistData();
   const { setSelectedTrackId, scrollContainerRef, stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
   const sensors = useDragSensors();
+
+  const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null);
 
   // dnd-kit's auto-scroll (@dnd-kit/dom's Scroller plugin) moves the
   // container by mutating `element.scrollLeft` directly — it never touches
@@ -229,9 +269,55 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       const sampleDelta =
         (event.operation.transform.x + scrollDeltaPx) * samplesPerPixel;
       const proposedStartSample = clip.startSample + sampleDelta;
+
+      // What clip (if any) the pointer is actually resting on at drop —
+      // drives the swap trigger below, not the dragged clip's own computed
+      // span (a long clip dropped in genuine empty space shouldn't offer a
+      // swap just because it's long enough to reach into a neighbor once
+      // placed there).
+      const scrollContainer = scrollContainerRef.current;
+      const pointerHit = scrollContainer
+        ? resolveClipAt(
+            event.operation.position.current.x,
+            event.operation.position.current.y,
+            scrollContainer,
+            tracks,
+            samplesPerPixel,
+            timeScaleHeight
+          )
+        : null;
+      const hitClipId =
+        pointerHit ? (tracks[pointerHit.trackIndex]?.clips[pointerHit.clipIndex]?.id ?? null) : null;
+
+      // Same-track only: dropping directly on a single immediate neighbor
+      // offers a swap instead of blocking. No commit yet — just show the
+      // popover.
+      if (sourceTrackIndex === targetTrackIndex) {
+        const overlap = findSameTrackNeighborAtPointer(clip, sourceTrack.clips, hitClipId);
+        if (overlap) {
+          playoutRef.current?.abortTransaction();
+          isDraggingRef.current = false;
+          setPendingSwap({
+            trackId: sourceTrack.id,
+            clipId: clip.id,
+            neighborId: overlap.neighbor.id,
+            side: overlap.side,
+            clipName: clip.name,
+            neighborName: overlap.neighbor.name,
+            anchor: {
+              x: event.operation.position.current.x,
+              y: event.operation.position.current.y,
+            },
+          });
+          return;
+        }
+      }
+
       const otherClips = targetTrack.clips.filter((c) => c.id !== clip.id);
-      const newStartSample = resolveDropPosition(
-        proposedStartSample
+      const newStartSample = resolveNonOverlappingStart(
+        proposedStartSample,
+        clip.durationSamples,
+        otherClips
       );
 
       const newTracks: ClipTrack[] = tracks.map((track, index) => {
@@ -300,6 +386,7 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
       tracks,
       onTracksChange,
       samplesPerPixel,
+      timeScaleHeight,
       playoutRef,
       isDraggingRef,
       playPendingRef,
@@ -311,15 +398,81 @@ function CrossTrackDragProvider({ children, playPendingRef }: ClipDragLayerProps
     ]
   );
 
+  // Re-looks-up clip/neighbor by id and re-checks adjacency rather than
+  // trusting what was captured at drag-end — some other commit (another
+  // drag, duplicate/delete, undo/redo) may have landed while the popover
+  // was open. A stale pending swap just no-ops.
+  //
+  // Reads `pendingSwap` directly from the closure rather than via
+  // setPendingSwap's updater-callback form: this is only ever invoked from
+  // a button click (never a rapid-fire event needing the updater form to
+  // dodge a stale closure), and the side effects below (flushSync, which
+  // itself must not run during another component's render, and
+  // onTracksChange, which flows into a Zustand set()) can't safely run
+  // *inside* a setState updater — same class of bug useFadeDragHandlers.ts
+  // already found and fixed once (see its own doc comment on
+  // dragMetaRef.current.previewDurationSamples).
+  const confirmPendingSwap = useCallback(() => {
+    const pending = pendingSwap;
+    setPendingSwap(null);
+    if (!pending) return;
+
+    const track = tracks.find((t) => t.id === pending.trackId);
+    const clip = track?.clips.find((c) => c.id === pending.clipId);
+    const neighbor = track?.clips.find((c) => c.id === pending.neighborId);
+    if (!track || !clip || !neighbor) return;
+
+    const sorted = [...track.clips].sort((a, b) => a.startSample - b.startSample);
+    const idx = sorted.findIndex((c) => c.id === clip.id);
+    const stillAdjacent =
+      (pending.side === "before" && idx > 0 && sorted[idx - 1].id === neighbor.id) ||
+      (pending.side === "after" && idx < sorted.length - 1 && sorted[idx + 1].id === neighbor.id);
+    if (!stillAdjacent) return;
+
+    const { clipStart, neighborStart } = computeSwapPositions(clip, neighbor, pending.side);
+    const newTracks: ClipTrack[] = tracks.map((t) =>
+      t.id !== track.id
+        ? t
+        : {
+            ...t,
+            clips: t.clips.map((c) =>
+              c.id === clip.id
+                ? { ...c, startSample: clipStart }
+                : c.id === neighbor.id
+                  ? { ...c, startSample: neighborStart }
+                  : c
+            ),
+          }
+    );
+
+    if (isPlaying) {
+      flushSync(() => stop());
+    }
+    onTracksChange?.(newTracks);
+  }, [pendingSwap, tracks, onTracksChange, isPlaying, stop]);
+
+  const declinePendingSwap = useCallback(() => setPendingSwap(null), []);
+
   return (
-    <DragDropProvider
-      sensors={sensors}
-      onDragStart={onDragStart}
-      onDragMove={onDragMove as unknown as DragDropProviderProps["onDragMove"]}
-      onDragEnd={onDragEnd}
-      plugins={noDropAnimationPlugins}
-    >
-      {children}
-    </DragDropProvider>
+    <>
+      <DragDropProvider
+        sensors={sensors}
+        onDragStart={onDragStart}
+        onDragMove={onDragMove as unknown as DragDropProviderProps["onDragMove"]}
+        onDragEnd={onDragEnd}
+        plugins={noDropAnimationPlugins}
+      >
+        {children}
+      </DragDropProvider>
+      {pendingSwap && (
+        <ClipSwapConfirmPopover
+          anchor={pendingSwap.anchor}
+          clipName={pendingSwap.clipName}
+          neighborName={pendingSwap.neighborName}
+          onConfirm={confirmPendingSwap}
+          onDecline={declinePendingSwap}
+        />
+      )}
+    </>
   );
 }

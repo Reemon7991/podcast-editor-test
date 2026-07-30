@@ -48,6 +48,41 @@ export function contentXFromClientX(clientX: number, container: HTMLElement): nu
   return clientX - container.getBoundingClientRect().left + container.scrollLeft;
 }
 
+/**
+ * First startSample >= proposedStartSample where a span of durationSamples
+ * fits without overlapping any existing clip — always pushes forward past
+ * whatever it would have overlapped, never backward. Used both for placing a
+ * *new* clip/batch (useTimelineTracks.ts's upload-at-playhead path) and for
+ * an existing clip's drag/drop block-or-clamp fallback (ClipDragLayer.tsx —
+ * see its findSameTrackNeighborAtPointer for the one same-track case this
+ * *isn't* used for, which offers a swap instead).
+ *
+ * Walks existing clips in order, pushing the candidate past each one it
+ * overlaps — checked against the *already-pushed* candidate each time, not
+ * just the original proposed span. A single overlap check against the
+ * original span isn't enough: pushing past a close clip can still land
+ * exactly on top of a farther one the original span never reached.
+ */
+export function resolveNonOverlappingStart(
+  proposedStartSample: number,
+  durationSamples: number,
+  existingClips: { startSample: number; durationSamples: number }[]
+): number {
+  const sorted = [...existingClips].sort((a, b) => a.startSample - b.startSample);
+  // Floored here, not just at each push below — a fractional proposed
+  // position that needs no push at all (ClipDragLayer.tsx's drag math isn't
+  // integer, unlike useTimelineTracks.ts's upload path) would otherwise
+  // pass straight through unfloored.
+  let start = Math.max(0, Math.floor(proposedStartSample));
+  for (const c of sorted) {
+    const clipEnd = c.startSample + c.durationSamples;
+    if (start < clipEnd && start + durationSamples > c.startSample) {
+      start = clipEnd;
+    }
+  }
+  return start;
+}
+
 // @waveform-playlist/browser doesn't re-export core's clipPixelWidth (only
 // @waveform-playlist/core does, which isn't a direct dependency here) —
 // this mirrors that function's implementation exactly (confirmed by reading

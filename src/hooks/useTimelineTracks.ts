@@ -4,8 +4,15 @@ import { useCallback, useState } from "react";
 import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
 import { saveAsset } from "../utils/persistence";
+import { resolveNonOverlappingStart } from "../utils/clipGeometry";
 import type { ClipMeta } from "../utils/types";
 import { createEmptyTrack, useProjectStore } from "../store/projectStore";
+
+interface DecodedFile {
+  file: File;
+  audioBuffer: AudioBuffer;
+  assetId: string;
+}
 
 /**
  * Track/clip identity is stable across renders. State (`present`) lives in
@@ -69,7 +76,7 @@ export function useTimelineTracks() {
         const audioContext = Tone.getContext().rawContext as AudioContext;
         let assetSaveFailures = 0;
         const results = await Promise.allSettled(
-          files.map(async (file) => {
+          files.map(async (file): Promise<DecodedFile> => {
             const arrayBuffer = await file.arrayBuffer();
             // Hash before decoding, not after — see assetRegistry.ts's
             // hashFileBytes doc comment on why (decodeAudioData buffer
@@ -107,8 +114,23 @@ export function useTimelineTracks() {
           (prev) =>
             prev.map((track) => {
               if (track.id !== trackId) return track;
-              let cursor = 0;
-              let cursorInitialized = false;
+              const decoded = results.filter(
+                (r): r is PromiseFulfilledResult<DecodedFile> => r.status === "fulfilled"
+              );
+              if (decoded.length === 0) return track;
+              const sampleRate = decoded[0].value.audioBuffer.sampleRate;
+              const totalDurationSamples = decoded.reduce(
+                (sum, r) => sum + r.value.audioBuffer.length,
+                0
+              );
+              // The batch is laid out contiguously starting here — pushed
+              // forward, as one block, past whatever it would otherwise have
+              // overlapped, rather than stacking on top of an existing clip.
+              let cursor = resolveNonOverlappingStart(
+                Math.round(insertionTimeSeconds * sampleRate),
+                totalDurationSamples,
+                track.clips
+              );
               const appended: ClipMeta[] = [];
               for (const result of results) {
                 if (result.status === "rejected") {
@@ -119,10 +141,6 @@ export function useTimelineTracks() {
                   continue;
                 }
                 const { file, audioBuffer, assetId } = result.value;
-                if (!cursorInitialized) {
-                  cursor = Math.round(insertionTimeSeconds * audioBuffer.sampleRate);
-                  cursorInitialized = true;
-                }
                 const startSample: number = cursor;
                 appended.push({
                   id: crypto.randomUUID(),
