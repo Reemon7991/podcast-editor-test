@@ -65,33 +65,21 @@ body {
   pointer-events: none;
 }
 
-/* The vendored trim-handle strip (ClipBoundary) is hover-revealed already
-   but its styled-components CSS isn't theme-configurable (confirmed by
-   reading the source: it reads no `theme` prop, unlike FadeOverlay), so this
-   is a CSS-only addition targeting the stable data-boundary-edge attribute
-   instead of touching vendor JS. Drawn as a small corner-notch grip near the
-   clip's header rather than a full-height centered strip. The 8px full-height
-   hit-testing strip itself is untouched — this only adds a decorative,
-   non-interactive mark within it. */
-[data-boundary-edge]::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 10px;
-  width: 4px;
-  height: 16px;
-  transform: translateX(-50%);
-  border-radius: 2px;
-  background: var(--accent-purple-700);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  pointer-events: none;
-}
-
-[data-boundary-edge]:hover::after {
-  opacity: 1;
-}
+/* Trim-handle bars: NOT done via a `[data-boundary-edge]::after` CSS rule
+   (tried first, reverted) — `ClipContainer` (`data-clip-container`) has
+   `pointer-events: none` on itself (confirmed by reading
+   @waveform-playlist/ui-components' source — BoundaryContainer's own doc
+   comment explicitly notes it re-enables pointer-events itself "because
+   parent ClipContainer has pointer-events: none"), and the waveform/canvas
+   body never re-enables it. So `[data-clip-container]:hover` can only ever
+   be true via a hoverable descendant — in practice just the header — never
+   from hovering the waveform body, unlike FadeHandles.tsx's reveal (a JS
+   mousemove hit-test against the clip's full bounding box, indifferent to
+   pointer-events). A CSS-only rule here structurally can't match "hover
+   anywhere on the clip" the way fades already do. Rendered instead in
+   ClipActionsOverlay.tsx as TrimHandleBars, portaled the same way
+   FadeHandles already is and gated on the exact same `active` hover state —
+   see that file for the actual implementation. */
 
 /* AnimatedPlayhead/AnimatedMediaElementPlayhead (@waveform-playlist/browser)
    set the playhead line's width via an inline style equal to

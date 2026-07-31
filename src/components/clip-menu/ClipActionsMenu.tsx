@@ -22,6 +22,20 @@ interface ClipActionsMenuProps {
    *  (e.g. ClipActionsOverlay) keep this component mounted — and therefore
    *  its menu open — even after the pointer that revealed it moves away. */
   onOpenChange?: (open: boolean) => void;
+  /** Optional — set on the trigger button as `data-clip-actions-for`
+   *  (deliberately NOT `data-clip-id`: that attribute already means "this is
+   *  the draggable clip element" throughout this app — SELECTORS.draggableClip
+   *  in e2e/helpers.ts is `[data-clip-id]:not([data-boundary-edge])`, and
+   *  reusing the same name on this button would make it match that selector
+   *  too, silently doubling every "clip" count in the whole e2e suite —
+   *  confirmed by hitting exactly that regression). Since
+   *  ClipActionsOverlay.tsx now renders one persistent button per clip (not
+   *  just one shared button for a hovered clip), plain accessible-name
+   *  queries like `getByRole("button", { name: "Clip actions" })` are
+   *  ambiguous once more than one clip exists; this gives callers (and e2e
+   *  tests) a stable way to target a specific clip's button instead. Purely
+   *  a DOM attribute — this component's own logic never reads it. */
+  clipId?: string;
 }
 
 const DROPDOWN_MIN_WIDTH = 160;
@@ -39,7 +53,7 @@ const DROPDOWN_MIN_WIDTH = 160;
  * `document.body`, clamped to the viewport) mirrors `TrackMenu`'s, since
  * that part is already proven to work well here.
  */
-export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMenuProps) {
+export function ClipActionsMenu({ actions, style, onOpenChange, clipId }: ClipActionsMenuProps) {
   const [open, setOpenState] = useState(false);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -108,6 +122,7 @@ export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMen
       <button
         ref={buttonRef}
         type="button"
+        data-clip-actions-for={clipId}
         title="Clip actions"
         aria-label="Clip actions"
         aria-haspopup="menu"
@@ -122,7 +137,13 @@ export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMen
           setOpen(!open);
         }}
         style={style}
-        className="flex items-center justify-center rounded-full bg-[var(--accent-purple-700)]/80 text-white hover:bg-[var(--accent-purple-700)]"
+        // No resting background — the button is now always visible (not
+        // just on hover) for every clip, so a permanent filled circle would
+        // clutter every clip header at once. text color alone (a dark
+        // purple, against the clip header's own light --accent-purple-100
+        // tint) keeps it legible; the hover tint is just an affordance, not
+        // a persistent fill.
+        className="flex items-center justify-center rounded-full bg-transparent text-[var(--accent-purple-700)] hover:bg-[var(--accent-purple-700)]/10"
       >
         <DotsIcon />
       </button>

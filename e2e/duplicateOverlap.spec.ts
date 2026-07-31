@@ -1,6 +1,18 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { makeSineWavFile } from "./fixtures";
 import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, rebuildsEngine } from "./helpers";
+
+// ClipActionsOverlay.tsx renders one persistent "..." button per clip (not
+// just for a hovered one), so a plain getByRole("button", { name: "Clip
+// actions" }) is ambiguous once more than one clip exists. The button
+// carries `data-clip-actions-for` (ClipActionsMenu.tsx's own `clipId` prop,
+// deliberately not `data-clip-id` — see that file's doc comment), so reading
+// a clip's id off its own `data-clip-id` and scoping the button query by it
+// picks out the right one.
+async function clipActionsButtonFor(page: Page, clip: ReturnType<Page["locator"]>) {
+  const clipId = await clip.getAttribute("data-clip-id");
+  return page.locator(`button[data-clip-actions-for="${clipId}"]`);
+}
 
 /**
  * useClipActions.duplicateClip used to place the copy at
@@ -24,7 +36,7 @@ test.describe("Duplicate collision avoidance", () => {
     const bBox = (await clips.nth(1).boundingBox())!;
 
     await clips.nth(0).hover();
-    await page.getByRole("button", { name: "Clip actions" }).click();
+    await (await clipActionsButtonFor(page, clips.nth(0))).click();
 
     const rebuilt = await rebuildsEngine(page, async () => {
       await page.getByRole("menuitem", { name: "Duplicate" }).click();
