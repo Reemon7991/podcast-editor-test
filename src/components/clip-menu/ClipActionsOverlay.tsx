@@ -6,11 +6,11 @@ import {
   usePlaylistControls,
   usePlaylistData,
   usePlaybackAnimation,
-  useClipSplitting,
 } from "@waveform-playlist/browser";
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
 import { FadeHandles } from "./FadeHandles";
-import { useScissorsSplit } from "../../hooks/useScissorsSplit";
+import type { SelectedClip } from "./ClipActionsToolbar";
+import type { UseScissorsSplitResult } from "../../hooks/useScissorsSplit";
 import { useFadeDragHandlers } from "../../hooks/useFadeDragHandlers";
 import { resolveClipAt, clipPixelWidth } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
@@ -39,6 +39,21 @@ interface ClipActionsOverlayProps {
    *  commitEngineOutput via the same unconditional-rebuild path a hand-
    *  applied move does, so it needs the same guard. */
   playPendingRef: RefObject<boolean>;
+  /** Single shared instance, owned by EditorShell.tsx (the nearest common
+   *  parent of this component and the top-bar ClipActionsToolbar), so both
+   *  the hover "…" menu's Split action and the toolbar's Split button arm
+   *  the *same* scissors-mode state rather than two independent ones that
+   *  could desync. Everything else in this component — hover tracking, fade
+   *  drag, menu rendering — is unchanged; only where these two values come
+   *  from moved up one level. */
+  scrollEl: HTMLDivElement | null;
+  scissors: UseScissorsSplitResult;
+  /** Clip explicitly selected via EditorShell.tsx's click-to-select
+   *  listener — distinct from `hovered` below (a transient hover reveal).
+   *  Rendered here as a persistent highlight ring using the same
+   *  left/width/top geometry this component already computes for the hover
+   *  button, rather than recomputing it in a separate component. */
+  selectedClip: SelectedClip | null;
 }
 
 /**
@@ -57,9 +72,10 @@ interface ClipActionsOverlayProps {
  * in this app (ClipDragLayer's cross-track detection, EditorShell's
  * track-click detection), not a new approach.
  *
- * Both this button and useScissorsSplit's preview line are portaled into
- * the library's own scroll container (`scrollContainerRef.current`,
- * confirmed via its source to be `position: relative` with
+ * Both this button and the scissors preview line (state owned by
+ * EditorShell.tsx, passed down as the `scissors` prop — see that prop's own
+ * doc comment) are portaled into the library's own scroll container
+ * (`scrollEl` prop, confirmed via its source to be `position: relative` with
  * `overflow-x: auto` and clip content positioned directly inside it) rather
  * than kept as a sibling of <Waveform> — that makes them scroll natively
  * with the timeline instead of needing manual scroll-offset syncing.
@@ -82,36 +98,22 @@ interface ClipActionsOverlayProps {
  *     gets you to the menu without a long scroll, scissors mode is still
  *     how you pick exactly where to cut.
  */
-export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingRef }: ClipActionsOverlayProps) {
-  const {
-    tracks,
-    samplesPerPixel,
-    timeScaleHeight,
-    sampleRate,
-    isReady,
-    isDraggingRef,
-    playoutRef,
-    onTracksChange,
-  } = usePlaylistData();
-  const { scrollContainerRef, stop } = usePlaylistControls();
+export function ClipActionsOverlay({
+  onDuplicateClip,
+  onDeleteClip,
+  playPendingRef,
+  scrollEl,
+  scissors,
+  selectedClip,
+}: ClipActionsOverlayProps) {
+  const { tracks, samplesPerPixel, timeScaleHeight, isDraggingRef, onTracksChange } = usePlaylistData();
+  const { stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
-  const { splitClipAt } = useClipSplitting({ tracks, samplesPerPixel, engineRef: playoutRef });
 
-  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const [hovered, setHovered] = useState<ClipRef | null>(null);
   const [menuOpenFor, setMenuOpenFor] = useState<ClipRef | null>(null);
   const [fadeDragLockedFor, setFadeDragLockedFor] = useState<ClipRef | null>(null);
   const [viewport, setViewport] = useState({ scrollLeft: 0, clientWidth: 0 });
-
-  const scissors = useScissorsSplit({
-    scrollContainerRef,
-    scrollEl,
-    tracks,
-    samplesPerPixel,
-    timeScaleHeight,
-    sampleRate,
-    splitClipAt,
-  });
 
   // The mousemove hover-tracking effect below already nulls `hovered` out
   // for the whole gesture whenever isDraggingRef.current is true — a signal
@@ -144,15 +146,6 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingR
     stop,
     onDragLockChange: handleFadeDragLockChange,
   });
-
-  // scrollContainerRef.current is only assigned by <Waveform>'s own ref
-  // callback during commit. Reading it directly during render (e.g. as a
-  // portal target computed inline in JSX) would race a same-commit (re)mount
-  // and see the pre-rebuild value — mirrors EditorShell's own scroll-restore
-  // effect, which hits the same timing issue for the same reason.
-  useEffect(() => {
-    setScrollEl(scrollContainerRef.current);
-  }, [isReady, scrollContainerRef]);
 
   // Keeps `viewport` current for the button's visible-edge clamp below. Its
   // only dependency is `scrollEl`, so it never tears itself down on a
@@ -200,6 +193,45 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingR
 
   if (!scrollEl) return null;
 
+  // Independent of hover — drawn for whichever clip is `selectedClip`
+  // (EditorShell.tsx's click-to-select state), re-resolved from the live
+  // `tracks` array by id every render rather than trusting cached indices,
+  // so it stays correct across reorders/undo with no separate staleness
+  // guard needed here. Reuses the same left/width/top math the hover button
+  // below already computes, just for a different clip reference.
+  //
+  // A darker border (vs. the always-on light one from globals.css's
+  // [data-clip-container] rule) plus a translucent purple wash for "slightly
+  // darker background" — drawn as an overlay on top of the clip's own canvas
+  // rather than an actual background-color, since that canvas paints every
+  // pixel opaquely (see waveformTheme.ts's doc comment) and would hide a
+  // plain background underneath it entirely.
+  const selectedTrack = selectedClip ? tracks.find((t) => t.id === selectedClip.trackId) : undefined;
+  const selectedClipObj = selectedTrack?.clips.find((c) => c.id === selectedClip?.clipId);
+  const selectedTrackIndex = selectedTrack ? tracks.indexOf(selectedTrack) : -1;
+  const selectionRingEl =
+    selectedTrack && selectedClipObj && selectedTrackIndex !== -1
+      ? createPortal(
+          <div
+            style={{
+              position: "absolute",
+              left: Math.floor(selectedClipObj.startSample / samplesPerPixel) - 2,
+              top: timeScaleHeight + selectedTrackIndex * TRACK_ROW_HEIGHT_PX - 2,
+              width:
+                clipPixelWidth(selectedClipObj.startSample, selectedClipObj.durationSamples, samplesPerPixel) +
+                4,
+              height: TRACK_ROW_HEIGHT_PX + 4,
+              background: "rgba(73, 43, 151, 0.14)",
+              border: "2px solid var(--accent-purple-600)",
+              borderRadius: 12,
+              pointerEvents: "none",
+              zIndex: 120,
+            }}
+          />,
+          scrollEl
+        )
+      : null;
+
   if (scissors.active) {
     if (scissors.lineX === null) return null;
     const lineHeight = timeScaleHeight + tracks.length * TRACK_ROW_HEIGHT_PX;
@@ -245,7 +277,7 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingR
   const activeTrack = active ? tracks[active.trackIndex] : undefined;
   const activeClip = active ? activeTrack?.clips[active.clipIndex] : undefined;
 
-  if (!active || !activeTrack || !activeClip) return null;
+  if (!active || !activeTrack || !activeClip) return selectionRingEl;
 
   const left = Math.floor(activeClip.startSample / samplesPerPixel);
   const width = clipPixelWidth(activeClip.startSample, activeClip.durationSamples, samplesPerPixel);
@@ -299,33 +331,38 @@ export function ClipActionsOverlay({ onDuplicateClip, onDeleteClip, playPendingR
     },
   ];
 
-  return createPortal(
+  return (
     <>
-      <ClipActionsMenu
-        key={activeClip.id}
-        actions={actions}
-        style={{
-          position: "absolute",
-          left: buttonLeft,
-          top: buttonTop,
-          width: BUTTON_SIZE,
-          height: BUTTON_SIZE,
-          zIndex: 200,
-        }}
-        onOpenChange={(open) => setMenuOpenFor(open ? active : null)}
-      />
-      <FadeHandles
-        trackIndex={active.trackIndex}
-        clipIndex={active.clipIndex}
-        clip={activeClip}
-        left={left}
-        width={width}
-        top={top + CLIP_HEADER_HEIGHT_PX}
-        samplesPerPixel={samplesPerPixel}
-        dragging={fadeDrag.dragging}
-        onStartDrag={fadeDrag.startDrag}
-      />
-    </>,
-    scrollEl
+      {selectionRingEl}
+      {createPortal(
+        <>
+          <ClipActionsMenu
+            key={activeClip.id}
+            actions={actions}
+            style={{
+              position: "absolute",
+              left: buttonLeft,
+              top: buttonTop,
+              width: BUTTON_SIZE,
+              height: BUTTON_SIZE,
+              zIndex: 200,
+            }}
+            onOpenChange={(open) => setMenuOpenFor(open ? active : null)}
+          />
+          <FadeHandles
+            trackIndex={active.trackIndex}
+            clipIndex={active.clipIndex}
+            clip={activeClip}
+            left={left}
+            width={width}
+            top={top + CLIP_HEADER_HEIGHT_PX}
+            samplesPerPixel={samplesPerPixel}
+            dragging={fadeDrag.dragging}
+            onStartDrag={fadeDrag.startDrag}
+          />
+        </>,
+        scrollEl
+      )}
+    </>
   );
 }

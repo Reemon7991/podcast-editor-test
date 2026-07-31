@@ -3,6 +3,13 @@ import { makeSineWavFile } from "./fixtures";
 import { SELECTORS, waitForWaveformReady, uploadFiles, rebuildsEngine, gotoEditor } from "./helpers";
 
 const PLAY = { name: "Play", exact: true } as const;
+// PlayPauseButton (UI-UX-redesign) merged the old separate Play/Pause
+// buttons into one toggle whose accessible name flips with isPlaying —
+// unlike the old PlayButton, it's never `disabled` while playing (it has to
+// stay clickable so a second click can pause). "Pause" becoming visible is
+// this toggle's own signal that play() actually resolved and isPlaying
+// flipped true, replacing the old "Play button is disabled" check.
+const PAUSE = { name: "Pause", exact: true } as const;
 const UNDO = { name: "Undo" } as const;
 
 /**
@@ -83,7 +90,12 @@ test.describe("Fade in/out", () => {
     const clipBox = (await clip.boundingBox())!;
     const start = await fadeInHandleCenter(page);
     // No fade set yet — the handle starts right at the clip's own left edge.
-    expect(start.x).toBeCloseTo(clipBox.x, 0);
+    // Precision -1 (not 0): globals.css's [data-clip-container] border (added
+    // in the UI-UX-redesign pass) shifts the clip's own rendered bounding box
+    // by its border-width, which the handle's independently-computed
+    // sample-based position doesn't share — a few px of slack absorbs that
+    // constant offset without loosening the check's actual intent.
+    expect(start.x).toBeCloseTo(clipBox.x, -1);
 
     await page.mouse.move(start.x, start.y);
     await page.mouse.down();
@@ -103,7 +115,8 @@ test.describe("Fade in/out", () => {
 
     await clip.hover();
     const undone = await fadeInHandleCenter(page);
-    expect(undone.x).toBeCloseTo(clipBox.x, 0);
+    // Precision -1, same reasoning as this test's own pre-drag check above.
+    expect(undone.x).toBeCloseTo(clipBox.x, -1);
   });
 
   test("Escape cancels a fade drag without committing", async ({ page }) => {
@@ -165,7 +178,7 @@ test.describe("Fade in/out", () => {
     await uploadFiles(page, [makeSineWavFile("tone.wav", 4)]);
 
     await page.getByRole("button", PLAY).click();
-    await expect(page.getByRole("button", PLAY)).toBeDisabled();
+    await expect(page.getByRole("button", PAUSE)).toBeVisible();
 
     const clip = page.locator(SELECTORS.draggableClip).first();
     await clip.hover();

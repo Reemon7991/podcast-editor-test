@@ -122,7 +122,7 @@ export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMen
           setOpen(!open);
         }}
         style={style}
-        className="flex items-center justify-center rounded bg-zinc-900/70 text-zinc-100 hover:bg-zinc-900/90"
+        className="flex items-center justify-center rounded-full bg-[var(--accent-purple-700)]/80 text-white hover:bg-[var(--accent-purple-700)]"
       >
         <DotsIcon />
       </button>
@@ -133,7 +133,7 @@ export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMen
             role="menu"
             onPointerDown={(e) => e.stopPropagation()}
             style={{ position: "fixed", top: dropdownPos.top, left: dropdownPos.left, zIndex: 10000 }}
-            className="min-w-[160px] overflow-hidden rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+            className="min-w-[160px] overflow-hidden rounded-xl border border-[var(--border)] bg-white py-1 shadow-lg"
           >
             {actions.map((action) => (
               <button
@@ -147,8 +147,8 @@ export function ClipActionsMenu({ actions, style, onOpenChange }: ClipActionsMen
                 }}
                 className={`block w-full px-3 py-1.5 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
                   action.destructive
-                    ? "text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                    : "text-zinc-800 hover:bg-zinc-100 dark:text-zinc-100 dark:hover:bg-zinc-700"
+                    ? "text-red-600 hover:bg-red-50"
+                    : "text-[var(--foreground)] hover:bg-[var(--accent-purple-50)]"
                 }`}
               >
                 {action.label}

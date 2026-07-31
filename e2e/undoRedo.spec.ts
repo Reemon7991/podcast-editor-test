@@ -5,6 +5,14 @@ import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./help
 const UNDO = { name: "Undo" } as const;
 const REDO = { name: "Redo" } as const;
 const REMOVE_TRACK = { name: "Remove track" } as const;
+const PLAY = { name: "Play", exact: true } as const;
+// PlayPauseButton (UI-UX-redesign) merged the old separate Play/Pause
+// buttons into one toggle whose accessible name flips with isPlaying —
+// unlike the old PlayButton, it's never `disabled` while playing (it has to
+// stay clickable so a second click can pause). "Pause" becoming visible is
+// this toggle's own signal that play() actually resolved and isPlaying
+// flipped true, replacing the old "Play button is disabled" check.
+const PAUSE = { name: "Pause", exact: true } as const;
 
 /**
  * Phase 2 (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md) — undo/redo via the
@@ -152,8 +160,8 @@ test.describe("Phase 2 undo/redo", () => {
     await gotoEditor(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 4)]);
 
-    await page.getByRole("button", { name: "Play", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeDisabled();
+    await page.getByRole("button", PLAY).click();
+    await expect(page.getByRole("button", PAUSE)).toBeVisible();
 
     const clip = page.locator(SELECTORS.draggableClip).first();
     await clip.hover();
@@ -163,7 +171,7 @@ test.describe("Phase 2 undo/redo", () => {
 
     // Playback should have been stopped (not left running against a
     // rebuilt/uninitialized engine) — Play should be clickable again.
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", PLAY)).toBeEnabled();
     expect(pageErrors).toEqual([]);
   });
 
@@ -177,13 +185,13 @@ test.describe("Phase 2 undo/redo", () => {
     await waitForWaveformReady(page);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 4)]);
 
-    await page.getByRole("button", { name: "Play", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeDisabled();
+    await page.getByRole("button", PLAY).click();
+    await expect(page.getByRole("button", PAUSE)).toBeVisible();
 
     await page.getByRole("button", UNDO).click();
     await waitForWaveformReady(page);
 
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", PLAY)).toBeEnabled();
     expect(pageErrors).toEqual([]);
   });
 });

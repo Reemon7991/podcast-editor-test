@@ -28,8 +28,12 @@ test.describe("single-clip playback", () => {
 
     // Play a real user gesture (required for AudioContext autoplay policy),
     // confirm the live time display advances, then pause and confirm it stops.
+    // PlayPauseButton (UI-UX-redesign) merged the old separate Play/Pause
+    // buttons into one toggle whose accessible name flips with isPlaying —
+    // "Pause" becoming visible is this toggle's own signal that play()
+    // actually resolved.
     await page.getByRole("button", { name: "Play", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
 
     await expect(async () => {
       const t = await page.locator(SELECTORS.currentTime).textContent();

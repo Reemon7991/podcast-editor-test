@@ -2,10 +2,10 @@ import { PodcastEditorLoader } from "@/components/PodcastEditorLoader";
 
 export default function Home() {
   return (
-    <div className="flex flex-1 flex-col items-stretch gap-8 bg-zinc-50 px-6 py-12 dark:bg-black">
-      <h1 className="text-center text-xl font-semibold text-zinc-900 dark:text-zinc-50">
-        Podcast Editor — Evaluation
-      </h1>
+    // pb-24 reserves room for EditorShell.tsx's fixed bottom transport bar
+    // (position: fixed to the viewport, not this page's own scroll) so it
+    // never overlaps the last track row/footer.
+    <div className="flex flex-1 flex-col items-stretch gap-4 bg-[var(--surface)] px-6 pt-6 pb-24">
       <PodcastEditorLoader />
     </div>
   );

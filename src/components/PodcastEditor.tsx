@@ -7,6 +7,7 @@ import { useClipActions } from "../hooks/useClipActions";
 import { useProjectHydration } from "../hooks/useProjectHydration";
 import { useProjectStore } from "../store/projectStore";
 import { saveProject } from "../utils/persistence";
+import { LoadingState } from "./ui/LoadingState";
 
 /** Trailing-edge debounce for the persistence write — coalesces rapid
  *  mutations (e.g. holding undo) into one IDB write instead of one per
@@ -82,11 +83,7 @@ export function PodcastEditor() {
   // Same visual language as PodcastEditorLoader's own dynamic-import loading
   // state, for a consistent two-stage load (module load, then IDB load).
   if (isProjectHydrating) {
-    return (
-      <p className="text-sm text-zinc-500 dark:text-zinc-400">
-        Loading project…
-      </p>
-    );
+    return <LoadingState message="Loading project…" />;
   }
 
   return (
@@ -114,13 +111,13 @@ export function PodcastEditor() {
  *  not fatal. */
 function WarningBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
       <span>{message}</span>
       <button
         type="button"
         onClick={onDismiss}
         aria-label="Dismiss"
-        className="shrink-0 text-amber-700 hover:text-amber-900 dark:text-amber-400 dark:hover:text-amber-200"
+        className="shrink-0 text-amber-700 hover:text-amber-900"
       >
         ✕
       </button>

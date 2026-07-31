@@ -1,8 +1,22 @@
 @import "tailwindcss";
 
+/* Palette tokens — kept in sync by hand with theme/tokens.ts (a plain CSS
+   file can't import the .ts constants, and this is a small fixed set). One
+   brand accent (purple, #492b97) used everywhere, light-only (no dark-mode
+   variants — this app targets a single light theme by design). */
 :root {
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #18181b;
+  --surface: #fafafa;
+  --border: #e4e4e7;
+  --text-muted: #71717a;
+  --accent-purple-50: #f6f4fa;
+  --accent-purple-100: #e9e6f3;
+  --accent-purple-200: #d2cae5;
+  --accent-purple-300: #ada0d0;
+  --accent-purple-500: #492b97;
+  --accent-purple-600: #3e2580;
+  --accent-purple-700: #331e6a;
 }
 
 @theme inline {
@@ -12,37 +26,64 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* The vendored trim-handle strip (@waveform-playlist/ui-components'
-   ClipBoundary) is functionally hover-revealed already but only shows a thin
-   2px border — reads as barely-there. Its styled-components CSS isn't
-   theme-configurable (confirmed by reading the source: it reads no `theme`
-   prop, unlike FadeOverlay), so this is a CSS-only addition targeting the
-   stable data-boundary-edge attribute instead of touching vendor JS. The 8px
-   full-height strip itself (hit-testing) is untouched — this only adds a
-   decorative, non-interactive pill centered within it. */
+/* The clip's own container (@waveform-playlist/ui-components' Clip.tsx,
+   `data-clip-container`) has no background/border-radius of its own — it's
+   a bare positioning box. Rounding it + clipping overflow is enough to turn
+   the header/waveform/fade-overlay inside it into one rounded pill shape,
+   no vendor theme support needed for this part at all. A light border
+   distinguishes one clip from the next/from the empty track around it —
+   the border sits on the box's own edge, unaffected by `overflow: hidden`
+   (that only clips descendant content, e.g. the waveform canvas). */
+[data-clip-container] {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1.5px solid var(--accent-purple-200);
+}
+
+/* The clip's own canvas (Channel.tsx) paints every pixel opaquely in this
+   draw mode, so a background on [data-clip-container] itself would be
+   entirely hidden behind it (confirmed by reading the source — see
+   theme/waveformTheme.ts's doc comment on waveOutlineColor for the full
+   trace). This overlay sits *above* the canvas in normal paint order
+   instead (a ::after pseudo-element paints after/over an element's regular
+   children) — translucent, so it reads as a light purple tint over
+   whatever's underneath (the off-white canvas background, the purple bars)
+   without needing to fight the canvas at all. Tuned so the off-white
+   canvas background + this overlay lands close to --accent-purple-100,
+   matching the clip header's own background for a uniform look. */
+[data-clip-container]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(73, 43, 151, 0.09);
+  pointer-events: none;
+}
+
+/* The vendored trim-handle strip (ClipBoundary) is hover-revealed already
+   but its styled-components CSS isn't theme-configurable (confirmed by
+   reading the source: it reads no `theme` prop, unlike FadeOverlay), so this
+   is a CSS-only addition targeting the stable data-boundary-edge attribute
+   instead of touching vendor JS. Drawn as a small corner-notch grip near the
+   clip's header rather than a full-height centered strip. The 8px full-height
+   hit-testing strip itself is untouched — this only adds a decorative,
+   non-interactive mark within it. */
 [data-boundary-edge]::after {
   content: "";
   position: absolute;
   left: 50%;
-  top: 50%;
+  top: 10px;
   width: 4px;
-  height: 28px;
-  transform: translate(-50%, -50%);
+  height: 16px;
+  transform: translateX(-50%);
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--accent-purple-700);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
   opacity: 0;
   transition: opacity 0.15s ease;
   pointer-events: none;
@@ -50,4 +91,17 @@ body {
 
 [data-boundary-edge]:hover::after {
   opacity: 1;
+}
+
+/* AnimatedPlayhead/AnimatedMediaElementPlayhead (@waveform-playlist/browser)
+   set the playhead line's width via an inline style equal to
+   `progressBarWidth` (confirmed by reading the source) — the same value
+   that also sizes the separate "already played" progress overlay drawn over
+   past bars, so reducing that prop to get a thinner playhead would thin the
+   progress overlay too. Overriding just the playhead via its own stable
+   `data-playhead` attribute (present on both variants) keeps the two
+   independent; `!important` is required here since it must beat that inline
+   style, not just a same-specificity class rule. */
+[data-playhead] {
+  width: 1.5px !important;
 }

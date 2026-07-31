@@ -4,6 +4,13 @@ import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, rebuildsEngin
 
 const UNDO = { name: "Undo" } as const;
 const PLAY = { name: "Play", exact: true } as const;
+// PlayPauseButton (UI-UX-redesign) merged the old separate Play/Pause
+// buttons into one toggle whose accessible name flips with isPlaying —
+// unlike the old PlayButton, it's never `disabled` while playing (it has to
+// stay clickable so a second click can pause). "Pause" becoming visible is
+// this toggle's own signal that play() actually resolved and isPlaying
+// flipped true, replacing the old "Play button is disabled" check.
+const PAUSE = { name: "Pause", exact: true } as const;
 const SWAP = { name: "Swap" } as const;
 const CANCEL = { name: "Cancel" } as const;
 const SWAP_DIALOG = { name: "Confirm clip reorder" } as const;
@@ -150,7 +157,7 @@ test.describe("Clip swap confirmation", () => {
     await uploadTwoContiguousClips(page);
 
     await page.getByRole("button", PLAY).click();
-    await expect(page.getByRole("button", PLAY)).toBeDisabled();
+    await expect(page.getByRole("button", PAUSE)).toBeVisible();
 
     const clips = page.locator(SELECTORS.draggableClip);
     await dragClipOnto(page, clips.nth(1), clips.nth(0));

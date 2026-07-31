@@ -38,8 +38,8 @@ interface PendingSwap {
 
 interface ClipDragLayerProps {
   children: ReactNode;
-  /** True for the duration of an in-flight PlayButton `play()` call (see
-   *  transport/PlayButton.tsx). The library's own `play()` re-reads its
+  /** True for the duration of an in-flight PlayPauseButton `play()` call (see
+   *  transport/PlayPauseButton.tsx). The library's own `play()` re-reads its
    *  engine ref after an internal `await engine.init()` instead of using a
    *  captured reference — if a drop lands mid-await and triggers an engine
    *  rebuild, `play()` resumes against the new (uninitialized) engine and

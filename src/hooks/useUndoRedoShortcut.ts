@@ -5,7 +5,7 @@ import { useProjectStore } from "../store/projectStore";
 
 /**
  * Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z, mounted from EditorShell.tsx and gated on
- * `enabled` (same isReady signal already gating TransportControls).
+ * `enabled` (same isReady signal already gating TopBar/BottomBar).
  *
  * Deliberately not the library's own `undo?: boolean` shortcut prop /
  * usePlaylistControls().undo/redo — confirmed via

@@ -17,7 +17,7 @@ interface UseScissorsSplitOptions {
   splitClipAt: (trackIndex: number, clipIndex: number, splitTime: number) => boolean;
 }
 
-interface UseScissorsSplitResult {
+export interface UseScissorsSplitResult {
   active: boolean;
   /** Content-space X of the preview line; null before the first pointer move
    *  after activation. */

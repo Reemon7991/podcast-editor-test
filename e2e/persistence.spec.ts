@@ -81,9 +81,13 @@ test.describe("Phase 3 persistence", () => {
     expect(reloadedBox.width).toBeCloseTo(trimmedBox.width, 0);
 
     // Playback works against the rehydrated (persisted blob, re-decoded)
-    // buffer, not just the DOM shape.
+    // buffer, not just the DOM shape. PlayPauseButton (UI-UX-redesign) merged
+    // the old separate Play/Pause buttons into one toggle whose accessible
+    // name flips with isPlaying instead of ever disabling while playing —
+    // "Pause" becoming visible is this toggle's own signal that play()
+    // actually resolved.
     await page.getByRole("button", { name: "Play", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
   });
 
   /**

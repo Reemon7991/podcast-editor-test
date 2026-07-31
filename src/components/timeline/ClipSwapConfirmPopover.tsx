@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Button } from "../ui/Button";
 
 interface ClipSwapConfirmPopoverProps {
   anchor: { x: number; y: number };
@@ -63,27 +64,19 @@ export function ClipSwapConfirmPopover({
       aria-label="Confirm clip reorder"
       onPointerDown={(e) => e.stopPropagation()}
       style={{ position: "fixed", top: pos.top, left: pos.left, width: POPOVER_WIDTH, zIndex: 10000 }}
-      className="rounded-md border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800"
+      className="rounded-xl border border-[var(--border)] bg-white p-3 shadow-lg"
     >
-      <p className="mb-2 text-sm text-zinc-800 dark:text-zinc-100">
+      <p className="mb-2 text-sm text-[var(--foreground)]">
         Swap position with &ldquo;{neighborName ?? "this clip"}&rdquo;
         {clipName ? ` and move "${clipName}" there` : ""}?
       </p>
       <div className="flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={onDecline}
-          className="rounded px-2 py-1 text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700"
-        >
+        <Button variant="ghost" size="sm" onClick={onDecline}>
           Cancel
-        </button>
-        <button
-          type="button"
-          onClick={onConfirm}
-          className="rounded bg-zinc-900 px-2 py-1 text-sm text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-        >
+        </Button>
+        <Button variant="primary" size="sm" onClick={onConfirm}>
           Swap
-        </button>
+        </Button>
       </div>
     </div>,
     document.body

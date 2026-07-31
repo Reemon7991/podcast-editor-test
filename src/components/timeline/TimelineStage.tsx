@@ -6,6 +6,12 @@ import { EditorShell } from "./EditorShell";
 import { TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
 import { dehydrate, hydrate } from "../../utils/clipHydration";
 import { useProjectStore } from "../../store/projectStore";
+import {
+  waveformTheme,
+  WAVEFORM_BAR_WIDTH,
+  WAVEFORM_BAR_GAP,
+  WAVEFORM_ROUNDED_BARS,
+} from "../../theme/waveformTheme";
 
 interface TimelineStageProps {
   onRemoveTrack: (trackIndex: number) => void;
@@ -60,7 +66,7 @@ export function TimelineStage({
 
   if (providerError) {
     return (
-      <p className="text-sm text-red-600 dark:text-red-400">
+      <p className="text-sm text-red-600">
         Failed to build timeline: {providerError}
       </p>
     );
@@ -75,6 +81,10 @@ export function TimelineStage({
       mono
       timescale
       controls={{ show: true, width: 180 }}
+      theme={waveformTheme}
+      barWidth={WAVEFORM_BAR_WIDTH}
+      barGap={WAVEFORM_BAR_GAP}
+      roundedBars={WAVEFORM_ROUNDED_BARS}
       deferEngineRebuild={deferEngineRebuild}
       onError={(err) => setProviderError(err.message)}
     >

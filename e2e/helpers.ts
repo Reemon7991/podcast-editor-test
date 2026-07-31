@@ -13,7 +13,14 @@ export const SELECTORS = {
   /** The clip's header bar — not the waveform <canvas>, not the
    *  data-boundary-edge="left"|"right" trim handles. */
   draggableClip: "[data-clip-id]:not([data-boundary-edge])",
-  fileInput: 'input[type="file"]',
+  /** Scoped to TopBar.tsx specifically — the UI-UX-redesign pass added a
+   *  second file input (AddClipsDropZone.tsx, at the bottom of the track
+   *  list) with the same bare `input[type="file"]` shape, so the old
+   *  unscoped selector now matches two elements. Both insert at the live
+   *  playhead position (activeTrackIdRef + currentTime) the same way, but
+   *  this suite's uploads all go through the top bar's specifically —
+   *  AddClipsDropZone itself is untested. */
+  fileInput: '[data-testid="top-bar"] input[type="file"]',
   /** FadeHandles.tsx's draggable circles — only mounted while a clip is
    *  hovered/fade-drag-locked (see ClipActionsOverlay.tsx), never present
    *  in the DOM otherwise. */
