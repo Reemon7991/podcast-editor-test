@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { useDragDropMonitor } from "@dnd-kit/react";
 import {
   usePlaylistControls,
   usePlaylistData,
@@ -24,6 +25,20 @@ import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../../utils/trackLayout"
 const CLIP_HEADER_HEIGHT_PX = TRACK_ROW_HEIGHT_PX - TRACK_WAVE_HEIGHT;
 const BUTTON_SIZE = 18;
 const BUTTON_INSET = 2;
+// How much space the name label reserves at a clip's own right edge so its
+// ellipsis-truncated text can never render under the "..." button — see
+// clipNameLabels' own doc comment below for why this is a safe upper bound
+// regardless of the button's actual (viewport-clamped) position.
+const NAME_LABEL_RIGHT_RESERVE_PX = BUTTON_SIZE + BUTTON_INSET + 4;
+// Matches globals.css's `[data-clip-container] { border-radius: 10px; }` —
+// that rule rounds the vendor's own clip container (and, via its
+// `overflow: hidden`, everything painted inside it, including the real
+// ClipHeader this overlay masks). This overlay's labels are portaled
+// *outside* that container (siblings in scrollEl, not descendants), so they
+// don't inherit that clipping and need the same radius applied to their own
+// top corners directly, or they'd paint a square edge over the container's
+// rounded ones.
+const CLIP_CONTAINER_RADIUS_PX = 10;
 // Extra breathing room from the visible edge of the scroll viewport (not the
 // clip's own edge) so the button never sits flush against it.
 const VIEWPORT_EDGE_INSET_PX = 12;
@@ -367,6 +382,75 @@ export function ClipActionsOverlay({
     },
   ];
 
+  // One label per clip, masking the vendor's own ClipHeader text underneath.
+  // @waveform-playlist/ui-components' ClipHeader always renders the *track's*
+  // name (confirmed by reading its source: browser's own peaks-building step
+  // sets `ClipPeaks.trackName = track.name` for every clip, so every header
+  // on a track shows the same label regardless of which file the clip came
+  // from) and <Waveform> exposes no prop/render-slot to override that — same
+  // "no children/render-prop escape hatch" limitation this file's own doc
+  // comment above already notes for Clip/ClipHeader. `clip.name` (populated
+  // at import time in useTimelineTracks.ts from the uploaded file's own name,
+  // and carried through duplicate/split/undo/persistence untouched) already
+  // has the value we want shown — this just paints it on top of the vendor's
+  // label instead. `pointerEvents: "none"` is load-bearing, not decorative:
+  // the real vendor ClipHeader underneath is the actual dnd-kit drag handle
+  // for moving the clip, so this overlay must never intercept pointer events.
+  //
+  // The div spans the clip's *full* width — it has to, to fully mask the
+  // vendor's own header text/background underneath, not just leave a
+  // same-colored gap that still shows the wrong name through a sliver at the
+  // right edge. Text truncation instead comes from `paddingRight`, not a
+  // narrower `width`: text-overflow:ellipsis truncates at the content box
+  // (inside the padding), while `background` still fills the full padding
+  // box, so the reserved strip on the right stays opaque and empty rather
+  // than exposing either the vendor's text or unmasked space. That reserved
+  // amount (NAME_LABEL_RIGHT_RESERVE_PX) is a safe upper bound on the
+  // button's position regardless of scroll: clampedButtonPosition (below)
+  // always resolves `buttonLeft <= left + width - BUTTON_SIZE - BUTTON_INSET`
+  // — its viewport clamp only ever pulls the button further left, toward
+  // `left`, never past that bound — so a long file name on a short clip can
+  // never render (even via ellipsis) under the "..." button, without this
+  // component needing to track `viewport` a second time just for that.
+  const clipNameLabels = tracks.flatMap((track, trackIndex) =>
+    track.clips.map((clip) => {
+      const { left, width, top } = clipGeometryFor(clip, trackIndex, samplesPerPixel, timeScaleHeight);
+      const label = clip.name ?? track.name;
+      return (
+        <div
+          key={`name-${clip.id}`}
+          title={label}
+          style={{
+            position: "absolute",
+            left,
+            top,
+            width,
+            height: CLIP_HEADER_HEIGHT_PX,
+            lineHeight: `${CLIP_HEADER_HEIGHT_PX}px`,
+            paddingLeft: 8,
+            paddingRight: NAME_LABEL_RIGHT_RESERVE_PX,
+            boxSizing: "border-box",
+            // Top corners only — this label only ever covers the header
+            // (top) portion of the clip, never its rounded bottom.
+            borderTopLeftRadius: CLIP_CONTAINER_RADIUS_PX,
+            borderTopRightRadius: CLIP_CONTAINER_RADIUS_PX,
+            background: "var(--accent-purple-100)",
+            color: "var(--accent-purple-700)",
+            fontSize: 11,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            pointerEvents: "none",
+            zIndex: 111,
+          }}
+        >
+          {label}
+        </div>
+      );
+    })
+  );
+
   // One "..." button per clip, always rendered (not just for a hovered/
   // active one) — each independently positioned/clamped via its own
   // clipGeometryFor/clampedButtonPosition, and each ClipActionsMenu instance
@@ -405,6 +489,7 @@ export function ClipActionsOverlay({
       {selectionRingEl}
       {createPortal(
         <>
+          {clipNameLabels}
           {clipButtons}
           {activeHover && (
             <>
