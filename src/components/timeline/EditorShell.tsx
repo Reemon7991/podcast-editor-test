@@ -26,7 +26,8 @@ import { useProjectExport } from "../../hooks/useProjectExport";
 import { registerStopIfPlaying } from "../../store/projectStore";
 
 interface EditorShellProps {
-  onRemoveTrack: (trackIndex: number) => void;
+  /** Undefined hides every track's close button — see TimelineStageProps. */
+  onRemoveTrack: ((trackIndex: number) => void) | undefined;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;

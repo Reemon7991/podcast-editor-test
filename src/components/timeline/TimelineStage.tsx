@@ -14,7 +14,9 @@ import {
 } from "../../theme/waveformTheme";
 
 interface TimelineStageProps {
-  onRemoveTrack: (trackIndex: number) => void;
+  /** Undefined hides every track's close button — used when only one track
+   *  remains, since a podcast needs at least one. See PodcastEditor.tsx. */
+  onRemoveTrack: ((trackIndex: number) => void) | undefined;
   /** True while any clip is still decoding — defers the (expensive) Tone.js
    *  engine rebuild until the whole import batch settles, so adding several
    *  files doesn't trigger a rebuild per file. */

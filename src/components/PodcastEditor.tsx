@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { TimelineStage } from "./timeline/TimelineStage";
 import { useTimelineTracks } from "../hooks/useTimelineTracks";
 import { useClipActions } from "../hooks/useClipActions";
@@ -69,11 +69,21 @@ export function PodcastEditor() {
     };
   }, [past, isProjectHydrating]);
 
+  // A podcast needs at least one track — the close button is hidden
+  // entirely once only one remains (see the conditional onRemoveTrack prop
+  // below), so this guard is a fallback for a stale-click race, not the
+  // primary defense.
+  const [deleteWarning, setDeleteWarning] = useState<string | null>(null);
+
   // WaveformPlaylistProvider's onRemoveTrack gives a track *index* (it's a
   // Waveform-level UI callback, not aware of our id-keyed state) — resolve it
   // back to a stable id before mutating state.
   const handleRemoveTrackByIndex = useCallback(
     (trackIndex: number) => {
+      if (tracks.length <= 1) {
+        setDeleteWarning("A podcast needs at least one track — this one can't be deleted.");
+        return;
+      }
       const track = tracks[trackIndex];
       if (track) removeTrack(track.id);
     },
@@ -92,8 +102,13 @@ export function PodcastEditor() {
         <WarningBanner message={hydrationWarning} onDismiss={dismissHydrationWarning} />
       )}
       {saveWarning && <WarningBanner message={saveWarning} onDismiss={dismissSaveWarning} />}
+      {deleteWarning && (
+        <WarningBanner message={deleteWarning} onDismiss={() => setDeleteWarning(null)} />
+      )}
       <TimelineStage
-        onRemoveTrack={handleRemoveTrackByIndex}
+        // Hides every track's close button once only one track remains —
+        // see handleRemoveTrackByIndex's doc comment.
+        onRemoveTrack={tracks.length > 1 ? handleRemoveTrackByIndex : undefined}
         deferEngineRebuild={isLoading}
         onAddTrack={addTrack}
         onAddFilesToTrack={addFilesToTrack}

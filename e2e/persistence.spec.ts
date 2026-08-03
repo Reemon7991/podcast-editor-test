@@ -3,6 +3,7 @@ import { makeSineWavFile } from "./fixtures";
 import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./helpers";
 
 const REMOVE_TRACK = { name: "Remove track" } as const;
+const MUTE = { name: "Mute", exact: true } as const;
 
 /**
  * Reads the `assets` object store's record count directly via the browser's
@@ -47,7 +48,11 @@ test.describe("Phase 3 persistence", () => {
     await gotoEditor(page);
     await waitForWaveformReady(page);
 
-    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(1);
+    // The lone default track's close button is hidden — a podcast needs at
+    // least one track, so "Remove track" only renders once a second track
+    // exists. Mute count===1 confirms the track itself is there.
+    await expect(page.getByRole("button", MUTE)).toHaveCount(1);
+    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(0);
     await expect(page.locator(SELECTORS.draggableClip)).toHaveCount(0);
   });
 
@@ -146,7 +151,10 @@ test.describe("Phase 3 persistence", () => {
       await page.goto("/");
       await waitForWaveformReady(page);
 
-      await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(1);
+      // Same reasoning as the fresh-project test above — the fallback
+      // project has one track, so its close button is hidden.
+      await expect(page.getByRole("button", MUTE)).toHaveCount(1);
+      await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(0);
       await expect(page.locator(SELECTORS.draggableClip)).toHaveCount(0);
     });
   });

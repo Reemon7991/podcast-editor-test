@@ -5,6 +5,7 @@ import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./help
 const UNDO = { name: "Undo" } as const;
 const REDO = { name: "Redo" } as const;
 const REMOVE_TRACK = { name: "Remove track" } as const;
+const MUTE = { name: "Mute", exact: true } as const;
 const PLAY = { name: "Play", exact: true } as const;
 // PlayPauseButton (UI-UX-redesign) merged the old separate Play/Pause
 // buttons into one toggle whose accessible name flips with isPlaying —
@@ -46,9 +47,13 @@ test.describe("Phase 2 undo/redo", () => {
     await waitForWaveformReady(page);
     await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(2);
 
+    // Undoing back to a single track hides its close button — a podcast
+    // needs at least one track — so this checks Mute count instead to
+    // confirm the track itself is still there.
     await page.getByRole("button", UNDO).click();
     await waitForWaveformReady(page);
-    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(1);
+    await expect(page.getByRole("button", MUTE)).toHaveCount(1);
+    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(0);
 
     await page.getByRole("button", REDO).click();
     await waitForWaveformReady(page);
@@ -93,9 +98,12 @@ test.describe("Phase 2 undo/redo", () => {
     await waitForWaveformReady(page);
     await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(2);
 
+    // See "add track can be undone and redone" above for why this checks
+    // Mute count instead of REMOVE_TRACK once back down to one track.
     await page.keyboard.press("Control+z");
     await waitForWaveformReady(page);
-    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(1);
+    await expect(page.getByRole("button", MUTE)).toHaveCount(1);
+    await expect(page.getByRole("button", REMOVE_TRACK)).toHaveCount(0);
 
     await page.keyboard.press("Control+Shift+z");
     await waitForWaveformReady(page);
