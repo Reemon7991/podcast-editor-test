@@ -124,8 +124,8 @@ export function EditorShell({
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
-  // same isReady signal already gating TopBar/BottomBar below.
-  useUndoRedoShortcut(isReady);
+  // same isReady/isExporting signals already gating TopBar/BottomBar below.
+  useUndoRedoShortcut(isReady && !isExporting);
 
   // Ref updates must happen outside render (React disallows mutating a ref's
   // `.current` during render).
@@ -240,7 +240,7 @@ export function EditorShell({
           onDeleteClip={onDeleteClip}
         />
       </div>
-      <div className="overflow-hidden rounded-xl border border-[var(--border)]">
+      <div className="relative overflow-hidden rounded-xl border border-[var(--border)]">
         {isReady ? (
           <ClipDragLayer playPendingRef={playPendingRef}>
             <div
@@ -269,6 +269,15 @@ export function EditorShell({
         ) : (
           <div className="flex h-32 items-center justify-center">
             <LoadingState message="Building waveform…" bare />
+          </div>
+        )}
+        {/* Blocks editing during export */}
+        {isExporting && (
+          <div
+            data-testid="export-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Exporting…" />
           </div>
         )}
       </div>
