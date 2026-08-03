@@ -549,6 +549,87 @@ test — the already-documented raw-`indexedDB.open()`-under-Playwright timing
 quirk two sections up, unrelated to this change, isolated in its own
 `describe` with `retries: 2`).
 
+### Post-Phase-3 fix: mute/solo/volume/pan never persisted, and scrambled after add/remove-track (FIXED)
+
+User-reported, two symptoms sharing one root cause: (1) track mute/solo/
+volume/pan weren't reliably surviving a reload; (2) muting track 2 and
+soloing track 3, then adding and deleting a 4th track, could leave both
+tracks' settings wrong — reset, or bled onto each other.
+
+**Root cause, confirmed by reading `@waveform-playlist/engine`/`browser`'s
+dist source directly**: `PlaylistEngine.setTrackMute/Solo/Volume/Pan` mutate
+the engine's own `_tracks` in place but only bump `mixerVersion`, never
+`tracksVersion` (by design — a volume drag shouldn't force a rebuild).
+`WaveformPlaylistProvider` mirrors this into its own React-local
+`trackStates` (index-parallel to its `tracks` prop) but never folds it back
+into `onTracksChange`, since that's gated on `tracksVersion` too — confirms
+the "dead fields" limitation already documented above is still true in the
+currently-installed version. `present` never learns about a mixer click at
+all; `TrackMeta.muted/soloed/volume/pan` stay at track-creation defaults
+forever. That alone explains bug 1. Bug 2 is a *second*, vendor-side defect
+on top: `loadAudio()` (the full-rebuild path, always taken on track
+removal) reconciles `trackStates` purely by **length**, never by track id —
+a length mismatch discards it and reseeds from the incoming (stale-default)
+`ClipTrack.muted/soloed/...`, so settings vanish; a length match keeps the
+old `trackStates[i]` entries as-is and just relabels `.name`, silently
+re-pairing whatever mixer values existed at each *position* with whichever
+track now sits there after removal shifted indices — settings bleed onto
+the wrong track.
+
+**Fix** (`store/projectStore.ts`, `components/timeline/EditorShell.tsx`,
+`components/PodcastEditor.tsx`): bridges the library's live `trackStates`
+out of the provider's context via a module-level registry
+(`registerLiveMixerState`/`withLiveMixerState`, same pattern `stopIfPlaying`
+already established for this exact problem). `withLiveMixerState` merges
+live values onto a `TrackMeta[]` snapshot by id, preserving object identity
+where nothing changed — called from `commit()` (every structural edit now
+carries forward live mixer state, which is also what fixes bug 2 — it
+always feeds correct values into whichever vendor reconciliation branch
+fires) and from `commitEngineOutput()` (so undo doesn't revert to a stale
+mixer value if a trim/split/move is the first engine-driven update since a
+live mixer change). A `mixerTouchVersion` counter, bumped from
+`EditorShell.tsx` when live mixer state actually changes, re-arms
+`PodcastEditor.tsx`'s debounced save for a session that ends on a pure
+mixer toggle — mixer edits never touch `past`, so the existing
+`past`-keyed save effect alone would miss that case.
+
+**Two real bugs caught in self-review, not by a test**:
+
+- Subscribing to `mixerTouchVersion` reactively
+  (`useProjectStore((s) => s.mixerTouchVersion)`) in `PodcastEditor.tsx`
+  made it re-render on every mixer click, cascading into the non-memoized
+  `TimelineStage.tsx` — whose `hydrate(tracks)` call always returns a *new*
+  top-level array even when every track is cache-identical. The provider's
+  reconciliation effect has no "did `tracks` really change" check beyond
+  reference identity, so this forced a full engine rebuild on every mixer
+  click. Caught by `e2e/hydration.spec.ts`'s "adding a track does not
+  rebuild the engine" failing; confirmed as a genuine regression (not a
+  pre-existing flake) via `git stash` against the unmodified baseline.
+  Fixed by subscribing imperatively (`useProjectStore.subscribe`) instead,
+  which never triggers a React re-render.
+- `EditorShell.tsx`'s live-mixer-state effect originally had no dependency
+  array, rerunning on every render — including every trim-preview
+  pointer-move frame, the app's hottest path (see the perf regression
+  above). Fixed by keying it on `trackStates` alone: that array only gets a
+  new reference on a real mixer edit or track add/remove, never a
+  clip-level edit.
+
+Verified: `tsc --noEmit`/`eslint` clean; full suite (49 tests) passed
+against a fresh prod build, re-run after the regression fix and again after
+the perf fix; three scripted real-browser checks (playwright-core, same
+discipline as "Verification approach" below) covering both reported
+scenarios end-to-end (mute+solo survive a reload; survive an add+delete of
+a 4th track; both together survive a reload) plus the undo edge case (mute
+a track, trim — the first engine-driven edit since the mute — undo once,
+mute is still on).
+
+Not built (disclosed): mute/solo/volume/pan are still not separate
+undo/redo steps — a live mixer change gets silently folded into whichever
+next real edit's history entry, the same treatment trim's live-preview
+frames already got in Phase 2 ("Trim's live-preview frames were flooding
+undo history"). A deliberate default, not something requested; revisit if
+a future session wants mixer changes itemized in the undo stack.
+
 ## Fade in/out (done)
 
 Small draggable circle handles at each clip's fade corners — drag inward/
@@ -1160,14 +1241,10 @@ what's described below. In `ClipDragLayer.tsx`:
   shape is also fixed to `"linear"` for v1 — no per-clip picker yet, though
   the field already round-trips through undo/redo and persistence, so
   adding one later doesn't touch either.
-- **Mute/solo/volume/pan clicks never update this app's own state** — see
-  "Export" above for the full trace (confirmed via the vendored dist
-  source). They work live (the library tracks them internally) but almost
-  certainly don't survive a reload or count as undo/redo steps, since
-  `present`'s copies of those fields are never touched. Export works around
-  it by reading the library's live state directly instead of fixing the
-  underlying gap — the fix would be making `TimelineStage.tsx` also mirror
-  `mixerVersion` changes back into the store, not attempted here.
+- ~~Mute/solo/volume/pan clicks never update this app's own state~~ —
+  **fixed**, see "Post-Phase-3 fix: mute/solo/volume/pan never persisted,
+  and scrambled after add/remove-track (FIXED)" above. Still not itemized
+  in the undo stack (disclosed there, not attempted).
 - **Export at this app's actual target scale (2-3 hour podcasts)** holds the
   decoded source buffers, the rendered offline `AudioBuffer`, and the final
   WAV `Blob` in memory simultaneously — a rough 3-hour stereo 16-bit render
