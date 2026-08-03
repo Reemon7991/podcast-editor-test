@@ -90,6 +90,13 @@ body {
    `data-playhead` attribute (present on both variants) keeps the two
    independent; `!important` is required here since it must beat that inline
    style, not just a same-specificity class rule. */
+/* The vendor's own playhead is z-index: 100 (confirmed by reading
+   @waveform-playlist/ui-components' source) — below its ClipHeader (110)
+   and this app's own per-clip name-label overlay (111, see
+   ClipActionsOverlay.tsx), so the line visually disappeared behind every
+   clip's header row as it swept across the timeline. Raised past both here.
+ */
 [data-playhead] {
   width: 1.5px !important;
+  z-index: 150 !important;
 }

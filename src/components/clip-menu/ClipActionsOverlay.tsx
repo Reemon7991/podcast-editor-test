@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { useDragDropMonitor } from "@dnd-kit/react";
 import {
   usePlaylistControls,
   usePlaylistData,
