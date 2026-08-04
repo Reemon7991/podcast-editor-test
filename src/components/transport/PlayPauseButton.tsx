@@ -4,6 +4,7 @@ import { useState, type RefObject } from "react";
 import {
   usePlaybackAnimation,
   usePlaylistControls,
+  usePlaylistData,
   usePlaylistState,
 } from "@waveform-playlist/browser";
 import { Button } from "../ui/Button";
@@ -25,7 +26,8 @@ interface PlayPauseButtonProps {
 export function PlayPauseButton({ playPendingRef }: PlayPauseButtonProps) {
   const { isPlaying, currentTimeRef } = usePlaybackAnimation();
   const { selectionStart, selectionEnd, isLoopEnabled } = usePlaylistState();
-  const { play, pause } = usePlaylistControls();
+  const { play, pause, seekTo } = usePlaylistControls();
+  const { duration } = usePlaylistData();
   const [isPending, setIsPending] = useState(false);
 
   const handleClick = async () => {
@@ -41,7 +43,19 @@ export function PlayPauseButton({ playPendingRef }: PlayPauseButtonProps) {
       if (hasSelection && !isLoopEnabled) {
         await play(selectionStart, selectionEnd - selectionStart);
       } else {
-        await play(currentTimeRef.current ?? 0);
+        // If the playhead is at or past the end of the timeline (e.g. the
+        // clip was trimmed so its new end now falls behind the playhead),
+        // play(currentTime) finds no audio content and silently stops.
+        // Reset to 0 first so playback always starts from the beginning in
+        // that case. 0.001s epsilon absorbs floating-point rounding between
+        // currentTimeRef and the engine's own duration computation.
+        const startTime = currentTimeRef.current ?? 0;
+        if (duration > 0 && startTime >= duration - 0.001) {
+          seekTo(0);
+          await play(0);
+        } else {
+          await play(startTime);
+        }
       }
     } finally {
       playPendingRef.current = false;
