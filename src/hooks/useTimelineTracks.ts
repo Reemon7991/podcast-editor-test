@@ -5,6 +5,7 @@ import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
 import { saveAsset } from "../utils/persistence";
 import { resolveNonOverlappingStart } from "../utils/clipGeometry";
+import { buildClipMeta } from "../utils/clipInsertion";
 import type { ClipMeta } from "../utils/types";
 import { createEmptyTrack, useProjectStore } from "../store/projectStore";
 
@@ -142,17 +143,9 @@ export function useTimelineTracks() {
                 }
                 const { file, audioBuffer, assetId } = result.value;
                 const startSample: number = cursor;
-                appended.push({
-                  id: crypto.randomUUID(),
-                  assetId,
-                  startSample,
-                  durationSamples: audioBuffer.length,
-                  offsetSamples: 0,
-                  sampleRate: audioBuffer.sampleRate,
-                  sourceDurationSamples: audioBuffer.length,
-                  gain: 1,
-                  name: file.name.replace(/\.[^/.]+$/, ""),
-                });
+                appended.push(
+                  buildClipMeta(assetId, audioBuffer, startSample, file.name.replace(/\.[^/.]+$/, ""))
+                );
                 cursor = startSample + audioBuffer.length;
               }
               return { ...track, clips: [...track.clips, ...appended] };
