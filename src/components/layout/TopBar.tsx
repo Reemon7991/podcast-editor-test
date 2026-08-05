@@ -1,10 +1,12 @@
 "use client";
 
-import { useRef, type ChangeEvent, type RefObject } from "react";
+import { useRef, useState, type ChangeEvent, type RefObject } from "react";
 import { usePlaybackAnimation } from "@waveform-playlist/browser";
 import { Button } from "../ui/Button";
 import { UndoRedoButtons } from "../transport/UndoRedoButtons";
 import { ClipActionsToolbar, type SelectedClip } from "../clip-menu/ClipActionsToolbar";
+import { MenuButton } from "../ui/MenuButton";
+import { GenerateSpeechModal } from "../tts/GenerateSpeechModal";
 
 interface TopBarProps {
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
@@ -39,6 +41,16 @@ export function TopBar({
 }: TopBarProps) {
   const { currentTime } = usePlaybackAnimation();
   const inputRef = useRef<HTMLInputElement>(null);
+  // null distinguishes "closed" from "open" — captured from activeTrackIdRef
+  // at the moment "Generate clip (AI)" is clicked (an event handler, not
+  // render), same as handleUpload already reads the ref. Reading
+  // activeTrackIdRef.current directly during render is not an option here:
+  // this project's eslint-plugin-react-hooks config rejects reading a ref's
+  // `.current` during render, not just writing it (see CLAUDE.md's Phase 1
+  // notes on this exact rule).
+  const [generateModalState, setGenerateModalState] = useState<{ trackId: string | null } | null>(
+    null
+  );
 
   const handleUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -72,9 +84,25 @@ export function TopBar({
 
       <div className="flex shrink-0 items-center gap-2">
         {exportError && <span className="text-xs text-red-600">{exportError}</span>}
-        <Button variant="secondary" icon={<UploadIcon />} onClick={() => inputRef.current?.click()}>
-          Upload clip
-        </Button>
+        <MenuButton
+          label=" Clip"
+          icon={<PlusIcon />}
+          minWidth={200}
+          actions={[
+            {
+              id: "upload-clip-file",
+              label: "Upload clip file",
+              icon: <UploadIcon />,
+              onSelect: () => inputRef.current?.click(),
+            },
+            {
+              id: "generate-clip-ai",
+              label: "Generate clip (AI)",
+              icon: <SparkleIcon />,
+              onSelect: () => setGenerateModalState({ trackId: activeTrackIdRef.current }),
+            },
+          ]}
+        />
         <Button
           variant="primary"
           icon={<ExportIcon />}
@@ -96,10 +124,60 @@ export function TopBar({
           className="hidden"
         />
       </div>
+      {generateModalState && (
+        <GenerateSpeechModal
+          trackId={generateModalState.trackId}
+          insertionTimeSeconds={currentTime}
+          onClose={() => setGenerateModalState(null)}
+        />
+      )}
     </div>
   );
 }
 
+function ExportIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+
+/** "+ Clip" trigger icon. */
+function PlusIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+/** "Upload clip file" menu item icon — same arrow-into-tray shape the old
+ *  standalone "Upload clip" button used before it moved into this dropdown. */
 function UploadIcon() {
   return (
     <svg
@@ -120,22 +198,17 @@ function UploadIcon() {
   );
 }
 
-function ExportIcon() {
+/** "Generate clip (AI)" menu item icon — a filled sparkle, the standard
+ *  "AI/generate" glyph. Deliberately filled rather than stroked (the only
+ *  filled icon in this file): a thin-stroke 4-point star reads poorly at
+ *  14px, and a solid accent for the one AI-powered action here is a common,
+ *  intentional differentiation (seen in most AI-feature iconography) rather
+ *  than an inconsistency — same currentColor scheme as every other icon,
+ *  no new color introduced. */
+function SparkleIcon() {
   return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="7 10 12 15 17 10" />
-      <line x1="12" y1="15" x2="12" y2="3" />
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z" />
     </svg>
   );
 }

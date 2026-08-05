@@ -11,10 +11,11 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open. Persistence, undo/redo, fade in/out, and export
-are all done now (see "Persistence + Undo/Redo layer", "Fade in/out", and
-"Export" below), each with a committed test suite — but that coverage is
-still scoped to those layers, not the rest of the app.
+the concrete gaps still open. Persistence, undo/redo, fade in/out, export, and
+now the first AI feature (text-to-speech) are all done now (see the
+persistence/undo-redo layer section, "Fade in/out", "Export", and
+"Text-to-Speech (Cartesia)" below), each with a committed test suite — but
+that coverage is still scoped to those layers, not the rest of the app.
 Every non-obvious decision below exists because of something concretely
 discovered while building this, not speculation — treat this file as the
 fastest way to avoid re-deriving that work in a future session.
@@ -75,15 +76,34 @@ those two; the AI features are the most speculative and probably last).
    real bugs found building it.
 5. **Audio effects** — per-clip or per-track processing (EQ, compression,
    gain automation, etc. — scope not yet defined).
-6. **AI features** — noise removal, humming removal, silence removal.
-   Almost certainly needs server-side processing (not in-browser WebAudio) —
-   scope, model/service choice, and where the compute runs are all open.
+6. **AI features** — text-to-speech, noise removal, humming removal, silence
+   removal. Almost certainly needs server-side processing (not in-browser
+   WebAudio) — scope, model/service choice, and where the compute runs are
+   mostly open, except for TTS: **done** (Cartesia, backend-owned request via
+   a Next.js Route Handler, triggered from a "+ Clip" toolbar dropdown,
+   inserted at the playhead through the existing upload clip-insertion
+   pipeline) — see "Text-to-Speech (Cartesia)" below for the actual
+   implementation and the real bugs found building it; `TTS_CARTESIA_PLAN.md`
+   is the original design doc, kept corrected (not left stale) against what
+   actually shipped. Noise/humming/silence removal remain fully open.
 
 ## Architecture
 
+**This tree predates several UI reorganizations** (a "UI-UX-redesign pass" —
+`TransportControls.tsx` split into `layout/TopBar.tsx` + `transport/
+BottomBar.tsx`, `ClipActionsToolbar.tsx`, `timeline/AddClipsDropZone.tsx`, a
+`components/ui/` folder for generic primitives — referenced in passing by
+`e2e/helpers.ts`'s own selector comments) and now also the Text-to-Speech
+feature further down, neither reflected here. Left as-is rather than
+rewritten in full as part of an unrelated change — the "Text-to-Speech
+(Cartesia)" section below lists that feature's actual current files; check
+the real `src/components/` tree directly for anything else not shown below.
+
 ```text
 src/
-  app/page.tsx                             server component, renders PodcastEditorLoader
+  app/
+    page.tsx                                server component, renders PodcastEditorLoader
+    api/tts/route.ts                        Cartesia TTS — see "Text-to-Speech (Cartesia)" below
   components/
     PodcastEditorLoader.tsx                next/dynamic(ssr:false) wrapper — REQUIRED, see below
     PodcastEditor.tsx                      top-level state owner: useTimelineTracks; threads addTrack/addFilesToTrack down to TimelineStage
@@ -864,6 +884,126 @@ supports), per-track export (`exportWav`'s `mode: 'individual'` exists and
 works, just not wired to any UI yet), 32-bit float output (`bitDepth` option
 exists, defaulted to 16-bit).
 
+## Text-to-Speech (Cartesia) (done)
+
+The first AI feature: a "+ Clip" toolbar dropdown next to "Export" with two
+actions, "Upload clip file" (the previous standalone button's exact behavior,
+unchanged) and "Generate clip (AI)" (opens a modal — text + voice picker —
+that calls Cartesia server-side and inserts the result exactly like an
+uploaded clip). Full original design: `TTS_CARTESIA_PLAN.md` — kept corrected
+against what actually shipped (not left to drift stale), including a
+"Superseded from the original plan" note on the one approach that was tried
+and abandoned mid-build (below).
+
+**Files**: `src/app/api/tts/route.ts` (server, holds `CARTESIA_API_KEY`),
+`src/utils/cartesiaVoices.ts` (curated voice list + `MAX_TTS_TEXT_LENGTH`,
+shared by both client and server so neither can drift from the other),
+`src/utils/clipInsertion.ts` (`buildClipMeta`, extracted out of
+`useTimelineTracks.ts`'s upload loop so upload and TTS insert a clip the same
+way), `src/hooks/useGenerateSpeech.ts` (client: fetch → decode → commit,
+mirrors `addFilesToTrack`'s shape trimmed to one clip),
+`src/components/ui/MenuButton.tsx` (the "+ Clip" dropdown), `src/components/
+tts/GenerateSpeechModal.tsx` (the generate form). `TopBar.tsx` wires it all
+together with the same `activeTrackIdRef`/`currentTime` values `handleUpload`
+already reads, so upload and generate land in the same place.
+
+**Real bugs and gotchas found building this** (each caught by actually
+building/running it, not by planning alone):
+
+1. **The planned `ClipActionsMenu` generalization doesn't survive this repo's
+   `eslint-plugin-react-hooks` "refs" rule.** The plan called for an optional
+   `renderTrigger` prop so the "+ Clip" button could reuse `ClipActionsMenu`'s
+   proven dropdown shape. That rule flags a DOM ref crossing *any* function
+   call made during render — including a render-prop that only forwards the
+   ref to a JSX `ref=` attribute, never reads `.current` — and this repo
+   holds a clean `eslint` run as a hard bar with zero existing suppressions
+   anywhere. Tried, reverted; `ClipActionsMenu.tsx` is untouched.
+   `src/components/ui/MenuButton.tsx` is a small dedicated component instead
+   — same portaled/positioned/dismissible dropdown shape, duplicated rather
+   than shared, since its trigger button is fully internal (no ref ever
+   crosses a function-call boundary). Lives in `ui/` alongside `Button.tsx`,
+   not `layout/` or `clip-menu/`, since nothing about it is TTS- or
+   toolbar-specific — `label`, optional `icon`, `minWidth`, and
+   `actions: { id, label, onSelect, icon? }[]`.
+2. **A hardcoded voice id can look right and still be wrong, or right and
+   still fail once.** The first `cartesiaVoices.ts` list was four ids
+   recalled from training data, not verified against a live account.
+   Verifying live (`GET https://api.cartesia.ai/voices` against this app's
+   own key) found three of the four genuinely exist, but the fourth
+   (originally labeled "Reflective Woman") didn't exist in the catalog at
+   all — that one would 404 on *every* use, not occasionally. Separately, a
+   confirmed-*valid* id ("Sophie - Teacher") 404'd once during manual testing
+   and succeeded on an immediate identical retry — a real, transient
+   Cartesia-side hiccup, not a bad id, and the direct motivation for the
+   retry logic below. Current list ids and names were re-derived from that
+   live response, not invented; re-verify the same way if this ever starts
+   404ing consistently rather than occasionally.
+3. **`isGenerating` React state alone doesn't close a double-submit race.**
+   Two `generateSpeech` calls landing before React re-renders/disables the
+   Generate button (two rapid clicks, in principle) would both read
+   `isGenerating === false` and fire two requests. Fixed with a synchronous
+   `isGeneratingRef`, checked and set at the very top of `generateSpeech` —
+   same reasoning this app's own `playPendingRef` already relies on (a ref
+   flips synchronously, ahead of any render, where state can't).
+4. **`route.ts` retries once on a 429 or 5xx, never on 4xx** — added directly
+   in response to finding 2 above. A 400/404 is a deterministic client-input
+   problem (bad text, unknown/genuinely-missing voice); retrying it only
+   delays the same inevitable failure. Each attempt gets its own fresh
+   timeout rather than sharing one budget across both.
+5. **`e2e/tts.spec.ts` mocking `**/api/tts` via `page.route` is real coverage
+   of the client, zero coverage of `route.ts` itself.** `page.route`
+   intercepts at the *browser* level — the request never reaches the route
+   handler at all, so nothing was actually verifying this route's own logic
+   (validation, the outgoing Cartesia request shape, the retry behavior
+   above). `e2e/ttsRoute.spec.ts` closes this by importing `POST` directly
+   and mocking `global.fetch` — a plain in-process Node test, no browser, no
+   dependency on the shared built/served Next app. That last part matters,
+   not just for speed: hitting the real webServer over HTTP instead would
+   need the outgoing Cartesia URL swapped to a local mock via an env var set
+   at that server's *startup*, but `playwright.config.ts`'s
+   `reuseExistingServer: !process.env.CI` means a developer's own
+   already-running `npm run start` (pointed at the real Cartesia API via
+   their real `.env.local`) would silently get reused instead, risking a
+   real call to Cartesia during a test run. Covers the `container: "wav"`
+   pin, retry-then-succeed, exhausted-retries, the no-retry-on-404 case as a
+   named regression test for finding 2, and validation-before-network-call.
+6. **A dead server on the shared test port produces failures that look like
+   a real regression but aren't one.** Mid-verification, `npx playwright
+   test` reported 55 failures, every one a 30s timeout on basic UI (e.g.
+   `getByRole("button", { name: "+ New Track" })` never appearing) — looked
+   exactly like the whole app had broken. Cause: an old, already-dead Next
+   server was still listening on port 3000 (confirmed via `curl` returning
+   nothing at all), and `reuseExistingServer: !process.env.CI` made
+   Playwright reuse it instead of starting fresh. Killing it and restarting
+   dropped the failure count to the 4 that were real (finding 7). Worth
+   remembering as a first check next time a full suite run "breaks" with
+   uniform, unrelated-looking timeouts: confirm the shared dev server is
+   actually alive (`curl http://127.0.0.1:3000/`) before suspecting the code.
+7. **A locator went stale mid-session, from an unrelated later edit, and
+   only the full suite caught it.** After the "+ Clip" button gained a plus
+   icon, its label changed from `"+ Clip"` to `" Clip"` (the "+" moving from
+   text into the icon) — its accessible name became `"Clip"`, but
+   `e2e/tts.spec.ts` still queried `{ name: "+ Clip" }`. Code review and
+   `tsc`/`eslint` can't catch this class of drift (a string literal, not a
+   type); only actually running the suite did. Fixed and extracted into a
+   documented `ADD_CLIP_BUTTON` locator constant so the reason is written
+   down, not just the fix.
+
+Committed coverage: `e2e/tts.spec.ts` (4 tests, mocks `**/api/tts` at the
+browser level — the "+ Clip" dropdown and modal open correctly, a successful
+generate inserts a clip at the playhead and closes the modal, an error shows
+inline and inserts nothing, undo removes a generated clip in one step) and
+`e2e/ttsRoute.spec.ts` (7 tests, see finding 5). Full suite (62 tests) passed
+against a fresh prod build.
+
+Not built (disclosed): fetching Cartesia's full voice library at runtime
+(hardcoded list of 4 for v1, see finding 2); any auth/rate-limiting on
+`/api/tts` (deliberately deferred — this app is intended to merge into a
+larger project that already has authentication, not meant to stand alone
+indefinitely); `AddClipsDropZone.tsx` (the drag-and-drop upload strip at the
+bottom of the track list) stays upload-only by design, not offered as a
+second "Generate clip (AI)" entry point.
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -880,6 +1020,18 @@ exists, defaulted to 16-bit).
 - This project's Next.js/React/Tailwind versions are intentionally bleeding
   edge (see `AGENTS.md` — "not the Next.js you know"). Check
   `node_modules/next/dist/docs/` before assuming standard Next.js behavior.
+- **`CARTESIA_API_KEY` must be set (server-only, never `NEXT_PUBLIC_*`) for
+  "Generate clip (AI)" to work.** Read by `src/app/api/tts/route.ts` from
+  `process.env` — unset, the route returns a clean 500 instead of a
+  mysterious failure, so the symptom is obvious in dev. Get a key from
+  Cartesia's dashboard; put it in `.env.local` (already covered by the
+  repo's blanket `.env*` gitignore rule, so no `.gitignore` exception or
+  committed `.env.example` was added — see `TTS_CARTESIA_PLAN.md`'s Step 5).
+  Not required for anything else in the app; every other feature works with
+  it unset. Restart the dev/prod server after adding it — this route is
+  server-rendered on demand (confirmed in `npm run build`'s route summary:
+  `ƒ /api/tts`, not prerendered), so it reads the env var at request time,
+  but the process still needs to have loaded it at startup.
 
 ## Library findings worth remembering
 
