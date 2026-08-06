@@ -1,41 +1,9 @@
 import { test, expect } from "@playwright/test";
 import * as fs from "fs";
 import { makeSineWavFile } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./helpers";
+import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, readWav } from "./helpers";
 
 const EXPORT = { name: /Export/ } as const;
-
-/**
- * Reads this app's own fixed 44-byte-header 16-bit PCM WAV layout (matches
- * @waveform-playlist/browser/tone's encodeWav — see useProjectExport.ts).
- */
-function readWav(buffer: Buffer) {
-  const sampleRate = buffer.readUInt32LE(24);
-  const numChannels = buffer.readUInt16LE(22);
-  const dataSize = buffer.readUInt32LE(40);
-  const numSamples = dataSize / 2 / numChannels;
-  const duration = numSamples / sampleRate;
-  return {
-    sampleRate,
-    numChannels,
-    duration,
-    sampleAt: (timeSeconds: number) => {
-      const i = Math.round(timeSeconds * sampleRate) * numChannels;
-      return buffer.readInt16LE(44 + i * 2) / 32768;
-    },
-    maxAbsInWindow: (startSeconds: number, windowSeconds: number) => {
-      const startIndex = Math.round(startSeconds * sampleRate);
-      const count = Math.round(windowSeconds * sampleRate);
-      let max = 0;
-      for (let i = startIndex; i < startIndex + count; i++) {
-        const offset = 44 + i * numChannels * 2;
-        if (offset + 2 > buffer.length) break;
-        max = Math.max(max, Math.abs(buffer.readInt16LE(offset) / 32768));
-      }
-      return max;
-    },
-  };
-}
 
 test.describe("Export", () => {
   test("Export button downloads a WAV matching the timeline duration", async ({ page }) => {

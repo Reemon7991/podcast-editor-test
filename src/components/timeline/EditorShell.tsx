@@ -12,6 +12,8 @@ import {
 } from "@waveform-playlist/browser";
 import { Button } from "../ui/Button";
 import { LoadingState } from "../ui/LoadingState";
+import { WarningBanner } from "../ui/WarningBanner";
+import { Toast } from "../ui/Toast";
 import { TopBar } from "../layout/TopBar";
 import { BottomBar } from "../transport/BottomBar";
 import { ClipDragLayer } from "./ClipDragLayer";
@@ -19,6 +21,7 @@ import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { AddClipsDropZone } from "./AddClipsDropZone";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
+import { useRemoveSilence } from "../../hooks/useRemoveSilence";
 import { resolveClipAt } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
@@ -37,6 +40,24 @@ interface EditorShellProps {
 /**
  * Renders inside WaveformPlaylistProvider. Split out from AudioTrackLoader so
  * this subtree only mounts once the provider context actually exists.
+ *
+ * useRemoveSilence() is called *here*, not lifted to PodcastEditor.tsx like
+ * useClipActions/useTimelineTracks — deliberately. Its processingClipId/
+ * toast state changes independently of any store commit() (it toggles
+ * around an async detect/splice pipeline that may commit nothing at all,
+ * e.g. "no silence detected"). TimelineStage.tsx sits *above* this
+ * component and recomputes `hydrate(tracks)` fresh — a brand new array
+ * reference, forcing a full engine rebuild — on *every* render where its
+ * own passthrough cache is stale (true after any plain commit(), since
+ * only commitEngineOutput populates it; see its own doc comment). A prop
+ * threaded down through TimelineStage that changes on its own would make
+ * TimelineStage re-render (and thus rebuild the engine) on every value
+ * change, independent of whether anything on the timeline actually
+ * changed — confirmed by instrumenting commit()/commitEngineOutput()
+ * directly and observing an extra "waveform-playlist:ready" dispatch with
+ * neither ever firing. Keeping this hook (and its toast/overlay) entirely
+ * below TimelineStage means its state changes only re-render this
+ * subtree, never TimelineStage itself.
  */
 export function EditorShell({
   onRemoveTrack,
@@ -45,6 +66,15 @@ export function EditorShell({
   onDuplicateClip,
   onDeleteClip,
 }: EditorShellProps) {
+  const {
+    removeSilence,
+    processingClipId,
+    toast: silenceToast,
+    dismissToast: dismissSilenceToast,
+    saveWarning: silenceSaveWarning,
+    dismissSaveWarning: dismissSilenceSaveWarning,
+  } = useRemoveSilence();
+  const isRemovingSilence = processingClipId !== null;
   const { isReady, tracks, trackStates, timeScaleHeight, samplesPerPixel, sampleRate, playoutRef } =
     usePlaylistData();
   const { selectedTrackId } = usePlaylistState();
@@ -125,8 +155,9 @@ export function EditorShell({
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
-  // same isReady/isExporting signals already gating TopBar/BottomBar below.
-  useUndoRedoShortcut(isReady && !isExporting);
+  // same isReady/isExporting/isRemovingSilence signals already gating
+  // TopBar/BottomBar below.
+  useUndoRedoShortcut(isReady && !isExporting && !isRemovingSilence);
 
   // Ref updates must happen outside render (React disallows mutating a ref's
   // `.current` during render).
@@ -215,6 +246,10 @@ export function EditorShell({
 
   return (
     <div className="flex flex-col gap-3">
+      {silenceSaveWarning && (
+        <WarningBanner message={silenceSaveWarning} onDismiss={dismissSilenceSaveWarning} />
+      )}
+      {silenceToast && <Toast message={silenceToast} onDismiss={dismissSilenceToast} />}
       {/* Cross-track clip moves go through onTracksChange directly (see
        *  ClipDragLayer.tsx), which the provider can only apply via a full
        *  engine rebuild — dispose + rebuild the Tone.js engine for every
@@ -223,11 +258,15 @@ export function EditorShell({
        *  (init() awaited on the pre-rebuild engine, play() then fired on the
        *  post-rebuild one) that throws "TonePlayout not initialized" if Play
        *  is pressed mid-rebuild. isReady is the provider's own rebuild-done
-       *  signal — gating the transport bar on it closes that window. */}
+       *  signal — gating the transport bar on it closes that window. Also
+       *  gated on isRemovingSilence, same treatment as isExporting — see the
+       *  editing overlay below. */}
       <div
         data-testid="top-bar"
-        className={isReady && !isExporting ? undefined : "pointer-events-none opacity-50"}
-        aria-disabled={!isReady || isExporting}
+        className={
+          isReady && !isExporting && !isRemovingSilence ? undefined : "pointer-events-none opacity-50"
+        }
+        aria-disabled={!isReady || isExporting || isRemovingSilence}
       >
         <TopBar
           onAddFilesToTrack={onAddFilesToTrack}
@@ -253,6 +292,8 @@ export function EditorShell({
             <ClipActionsOverlay
               onDuplicateClip={onDuplicateClip}
               onDeleteClip={onDeleteClip}
+              onRemoveSilence={removeSilence}
+              processingClipId={processingClipId}
               playPendingRef={playPendingRef}
               scrollEl={scrollEl}
               scissors={scissors}
@@ -281,6 +322,19 @@ export function EditorShell({
             <LoadingState message="Exporting…" />
           </div>
         )}
+        {/* Blocks editing while silence removal is in flight — same
+         *  full-editor treatment as export above, requested over the
+         *  original narrower "only disable this clip's own menu item"
+         *  design: simpler to reason about, and matches the one other
+         *  async, potentially-slow mutation this app already has. */}
+        {isRemovingSilence && (
+          <div
+            data-testid="silence-removal-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Removing silence…" />
+          </div>
+        )}
       </div>
       {/* Fixed to the viewport, not the page's own scroll — so play/pause
        *  (and the rest of the transport controls) always stays reachable
@@ -296,9 +350,9 @@ export function EditorShell({
       <div
         data-testid="transport-bar"
         className={`fixed inset-x-0 bottom-0 z-[200] px-6 pb-4 ${
-          isReady && !isExporting ? "" : "pointer-events-none opacity-50"
+          isReady && !isExporting && !isRemovingSilence ? "" : "pointer-events-none opacity-50"
         }`}
-        aria-disabled={!isReady || isExporting}
+        aria-disabled={!isReady || isExporting || isRemovingSilence}
       >
         <BottomBar playPendingRef={playPendingRef} />
       </div>

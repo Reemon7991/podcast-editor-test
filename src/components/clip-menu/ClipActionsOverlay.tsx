@@ -88,6 +88,12 @@ function clampedButtonPosition(
 interface ClipActionsOverlayProps {
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
+  onRemoveSilence: (trackId: string, clip: AudioClip) => void;
+  /** Id of the clip currently being processed, or null when idle. Disables
+   *  "Remove silence" on every clip's menu while set (removeSilence is
+   *  app-wide single-flight, not per-clip — see useRemoveSilence.ts), and
+   *  drives the busy label on the one matching clip. */
+  processingClipId: string | null;
   /** Threaded through to useFadeDragHandlers — see its own doc comment and
    *  transport/PlayButton.tsx / timeline/ClipDragLayer.tsx for the play()/
    *  rebuild race this guards against. A fade-drag commit reaches
@@ -159,6 +165,8 @@ interface ClipActionsOverlayProps {
 export function ClipActionsOverlay({
   onDuplicateClip,
   onDeleteClip,
+  onRemoveSilence,
+  processingClipId,
   playPendingRef,
   scrollEl,
   scissors,
@@ -349,28 +357,46 @@ export function ClipActionsOverlay({
     setHovered(null);
   };
 
-  const buildActions = (track: ClipTrack, clip: AudioClip): ClipMenuAction[] => [
-    {
-      id: "split",
-      label: "Split",
-      onSelect: () => {
-        scissors.activate();
-        closeAndReset();
+  const buildActions = (track: ClipTrack, clip: AudioClip): ClipMenuAction[] => {
+    const actions: ClipMenuAction[] = [
+      {
+        id: "split",
+        label: "Split",
+        onSelect: () => {
+          scissors.activate();
+          closeAndReset();
+        },
       },
-    },
-    {
-      id: "duplicate",
-      label: "Duplicate",
-      onSelect: () => {
-        // Duplicate/delete both go through `commit`, which stops playback
-        // first if needed on its own now — see projectStore.ts's
-        // `stopIfPlaying`/`registerStopIfPlaying` doc comment. No local guard
-        // needed here anymore.
-        onDuplicateClip(track.id, clip.id);
-        closeAndReset();
+      {
+        id: "duplicate",
+        label: "Duplicate",
+        onSelect: () => {
+          // Duplicate/delete both go through `commit`, which stops playback
+          // first if needed on its own now — see projectStore.ts's
+          // `stopIfPlaying`/`registerStopIfPlaying` doc comment. No local guard
+          // needed here anymore.
+          onDuplicateClip(track.id, clip.id);
+          closeAndReset();
+        },
       },
-    },
-    {
+    ];
+
+    // Audio-only feature — MIDI clips have nothing for it to act on.
+    if (!clip.midiNotes) {
+      actions.push({
+        id: "remove-silence",
+        label: processingClipId === clip.id ? "Removing silence…" : "Remove silence",
+        // App-wide single-flight (useRemoveSilence.ts), not per-clip — every
+        // clip's item disables while any one is running, not just this one.
+        disabled: processingClipId !== null,
+        onSelect: () => {
+          onRemoveSilence(track.id, clip);
+          closeAndReset();
+        },
+      });
+    }
+
+    actions.push({
       id: "delete",
       label: "Delete",
       destructive: true,
@@ -378,8 +404,10 @@ export function ClipActionsOverlay({
         onDeleteClip(track.id, clip.id);
         closeAndReset();
       },
-    },
-  ];
+    });
+
+    return actions;
+  };
 
   // One label per clip, masking the vendor's own ClipHeader text underneath.
   // @waveform-playlist/ui-components' ClipHeader always renders the *track's*

@@ -8,6 +8,7 @@ import { useProjectHydration } from "../hooks/useProjectHydration";
 import { useProjectStore } from "../store/projectStore";
 import { saveProject } from "../utils/persistence";
 import { LoadingState } from "./ui/LoadingState";
+import { WarningBanner } from "./ui/WarningBanner";
 
 /** Trailing-edge debounce for the persistence write — coalesces rapid
  *  mutations (e.g. holding undo) into one IDB write instead of one per
@@ -115,27 +116,6 @@ export function PodcastEditor() {
         onDuplicateClip={duplicateClip}
         onDeleteClip={deleteClip}
       />
-    </div>
-  );
-}
-
-/** Dismissible inline banner for persistence-degradation warnings (dropped
- *  clips on hydration, a failed asset save) — same "surface it in the UI,
- *  don't just console.warn" precedent as TimelineStage.tsx's providerError
- *  banner, amber rather than red since these are recoverable-this-session,
- *  not fatal. */
-function WarningBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-      <span>{message}</span>
-      <button
-        type="button"
-        onClick={onDismiss}
-        aria-label="Dismiss"
-        className="shrink-0 text-amber-700 hover:text-amber-900"
-      >
-        ✕
-      </button>
     </div>
   );
 }
