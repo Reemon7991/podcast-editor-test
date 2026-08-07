@@ -15,6 +15,12 @@ interface TopBarProps {
   activeTrackIdRef: RefObject<string | null>;
   exportProject: () => Promise<unknown>;
   isExporting: boolean;
+  /** Whether the Export button itself should be disabled — isExporting OR a
+   *  noise-reduction job in flight (see EditorShell.tsx's own doc comment on
+   *  this prop for why the latter). Kept separate from isExporting itself so
+   *  the button's label only ever reads "Exporting…" while actually
+   *  exporting, not while blocked for an unrelated reason. */
+  exportDisabled: boolean;
   exportError: string | null;
   selectedClip: SelectedClip | null;
   onSplitSelected: () => void;
@@ -33,6 +39,7 @@ export function TopBar({
   activeTrackIdRef,
   exportProject,
   isExporting,
+  exportDisabled,
   exportError,
   selectedClip,
   onSplitSelected,
@@ -111,7 +118,7 @@ export function TopBar({
               // error is already surfaced via exportError above
             });
           }}
-          disabled={isExporting}
+          disabled={exportDisabled}
         >
           {isExporting ? "Exporting…" : "Export"}
         </Button>

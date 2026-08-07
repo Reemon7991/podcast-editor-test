@@ -22,6 +22,8 @@ import { AddClipsDropZone } from "./AddClipsDropZone";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
 import { useRemoveSilence } from "../../hooks/useRemoveSilence";
+import { useNoiseReduction } from "../../hooks/useNoiseReduction";
+import { useToastQueue } from "../../hooks/useToastQueue";
 import { resolveClipAt } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
@@ -41,23 +43,28 @@ interface EditorShellProps {
  * Renders inside WaveformPlaylistProvider. Split out from AudioTrackLoader so
  * this subtree only mounts once the provider context actually exists.
  *
- * useRemoveSilence() is called *here*, not lifted to PodcastEditor.tsx like
- * useClipActions/useTimelineTracks — deliberately. Its processingClipId/
- * toast state changes independently of any store commit() (it toggles
- * around an async detect/splice pipeline that may commit nothing at all,
- * e.g. "no silence detected"). TimelineStage.tsx sits *above* this
- * component and recomputes `hydrate(tracks)` fresh — a brand new array
- * reference, forcing a full engine rebuild — on *every* render where its
- * own passthrough cache is stale (true after any plain commit(), since
- * only commitEngineOutput populates it; see its own doc comment). A prop
- * threaded down through TimelineStage that changes on its own would make
- * TimelineStage re-render (and thus rebuild the engine) on every value
- * change, independent of whether anything on the timeline actually
- * changed — confirmed by instrumenting commit()/commitEngineOutput()
- * directly and observing an extra "waveform-playlist:ready" dispatch with
- * neither ever firing. Keeping this hook (and its toast/overlay) entirely
- * below TimelineStage means its state changes only re-render this
- * subtree, never TimelineStage itself.
+ * useRemoveSilence() and useNoiseReduction() are both called *here*, not
+ * lifted to PodcastEditor.tsx like useClipActions/useTimelineTracks —
+ * deliberately. Each one's own processingClipId/toast state changes
+ * independently of any store commit() (they toggle around an async
+ * pipeline — detect/splice, or create/poll/fetch — that may commit nothing
+ * at all, e.g. "no silence detected", or take a couple of minutes before it
+ * commits anything). TimelineStage.tsx sits *above* this component and
+ * recomputes `hydrate(tracks)` fresh — a brand new array reference, forcing
+ * a full engine rebuild — on *every* render where its own passthrough cache
+ * is stale (true after any plain commit(), since only commitEngineOutput
+ * populates it; see its own doc comment). A prop threaded down through
+ * TimelineStage that changes on its own would make TimelineStage re-render
+ * (and thus rebuild the engine) on every value change, independent of
+ * whether anything on the timeline actually changed — confirmed by
+ * instrumenting commit()/commitEngineOutput() directly and observing an
+ * extra "waveform-playlist:ready" dispatch with neither ever firing.
+ * Keeping both hooks (and their toast/overlay state) entirely below
+ * TimelineStage means their state changes only re-render this subtree,
+ * never TimelineStage itself — and, since both hooks' state changes are
+ * independent of each other too, noise reduction outliving several
+ * unrelated rebuilds triggered by other edits (see NOISE_REDUCTION_PLAN.md)
+ * falls out of the same property for free.
  */
 export function EditorShell({
   onRemoveTrack,
@@ -70,11 +77,34 @@ export function EditorShell({
     removeSilence,
     processingClipId,
     toast: silenceToast,
-    dismissToast: dismissSilenceToast,
     saveWarning: silenceSaveWarning,
     dismissSaveWarning: dismissSilenceSaveWarning,
   } = useRemoveSilence();
   const isRemovingSilence = processingClipId !== null;
+
+  const {
+    reduceNoise,
+    processingClipId: noiseReductionClipId,
+    toast: noiseReductionToast,
+    saveWarning: noiseReductionSaveWarning,
+    dismissSaveWarning: dismissNoiseReductionSaveWarning,
+  } = useNoiseReduction();
+  const isReducingNoise = noiseReductionClipId !== null;
+
+  // Shared outcome-toast slot for both async clip features above — see
+  // useToastQueue.ts's own doc comment. Each hook keeps its own `toast`
+  // state (untouched, still exercised directly by e2e/silenceRemoval.spec.ts
+  // et al.); this just re-announces whatever value lands into the one
+  // queue that actually renders, so two outcomes landing close together
+  // queue instead of one clobbering the other mid-display.
+  const toastQueue = useToastQueue();
+  const { push: pushToast } = toastQueue;
+  useEffect(() => {
+    if (silenceToast) pushToast(silenceToast);
+  }, [silenceToast, pushToast]);
+  useEffect(() => {
+    if (noiseReductionToast) pushToast(noiseReductionToast);
+  }, [noiseReductionToast, pushToast]);
   const { isReady, tracks, trackStates, timeScaleHeight, samplesPerPixel, sampleRate, playoutRef } =
     usePlaylistData();
   const { selectedTrackId } = usePlaylistState();
@@ -249,7 +279,10 @@ export function EditorShell({
       {silenceSaveWarning && (
         <WarningBanner message={silenceSaveWarning} onDismiss={dismissSilenceSaveWarning} />
       )}
-      {silenceToast && <Toast message={silenceToast} onDismiss={dismissSilenceToast} />}
+      {noiseReductionSaveWarning && (
+        <WarningBanner message={noiseReductionSaveWarning} onDismiss={dismissNoiseReductionSaveWarning} />
+      )}
+      {toastQueue.current && <Toast message={toastQueue.current} onDismiss={toastQueue.dismiss} />}
       {/* Cross-track clip moves go through onTracksChange directly (see
        *  ClipDragLayer.tsx), which the provider can only apply via a full
        *  engine rebuild — dispose + rebuild the Tone.js engine for every
@@ -273,6 +306,15 @@ export function EditorShell({
           activeTrackIdRef={activeTrackIdRef}
           exportProject={exportProject}
           isExporting={isExporting}
+          // Only Export is gated by a noise-reduction job in flight — drag,
+          // trim, delete, play, undo/redo stay fully available, per the
+          // whole point of this feature (see NOISE_REDUCTION_PLAN.md's
+          // "Guards worth including": an offline export render temporarily
+          // swaps Tone's global context, and this app's existing convention
+          // for an unproven-but-plausible Tone-context race is to close the
+          // trigger window structurally, same as isExporting's own guard
+          // already does).
+          exportDisabled={isExporting || isReducingNoise}
           exportError={exportError}
           selectedClip={selectedClip}
           onSplitSelected={scissors.activate}
@@ -294,6 +336,8 @@ export function EditorShell({
               onDeleteClip={onDeleteClip}
               onRemoveSilence={removeSilence}
               processingClipId={processingClipId}
+              onReduceNoise={reduceNoise}
+              noiseReductionClipId={noiseReductionClipId}
               playPendingRef={playPendingRef}
               scrollEl={scrollEl}
               scissors={scissors}

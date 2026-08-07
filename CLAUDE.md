@@ -91,7 +91,16 @@ those two; the AI features are the most speculative and probably last).
    the actual implementation and the real bugs found building and then
    actually using it; `SILENCE_REMOVAL_PLAN.md` is the original design doc,
    kept corrected against what actually shipped, same discipline as
-   `TTS_CARTESIA_PLAN.md`. Noise/humming removal remain fully open.
+   `TTS_CARTESIA_PLAN.md`. Noise removal: **implemented, not yet manually
+   verified against real Replicate** (no `REPLICATE_API_TOKEN` was available
+   this session — see "Noise reduction (Replicate)" below for the actual
+   implementation, the real findings from building it, and exactly what's
+   still unverified before calling it shippable) — Replicate
+   (`resemble-enhance`), per-clip, replaces the clip in place,
+   provider-abstracted so the vendor can be swapped later;
+   `NOISE_REDUCTION_PLAN.md` is the original design doc, kept corrected
+   against what actually shipped, same discipline as the other AI-feature
+   plan docs. Humming removal remains fully open.
 
 ## Architecture
 
@@ -1137,6 +1146,176 @@ repeatedly against a fresh prod build, plus a manual pass against a real
 10-minute synthetic recording measuring the actual UI-response timing (see
 bug 8) — not just the small clips the committed suite uses.
 
+## Noise reduction (Replicate) (implemented, not yet manually verified against real Replicate)
+
+Per-clip background-noise removal via Replicate's `resemble-enhance`,
+triggered from the same clip "..." menu, replacing the clip in place — same
+convention silence removal already established (same `startSample`, one
+clip in, one clip out, no ripple to the rest of the timeline). Full original
+design: `NOISE_REDUCTION_PLAN.md`, kept corrected against what actually
+shipped, same discipline as every other plan doc in this repo. **Caveat up
+front, not buried**: this session had no `REPLICATE_API_TOKEN`, so the
+plan's own required "one manual pass against a real token and a real noisy
+recording" (see its "Verification" section) has **not** happened —
+everything below is implemented, type-checked, linted, and covered by a full
+green e2e suite against mocks/fakes, but not yet proven against the real
+Replicate API. Do that pass before calling this shippable.
+
+**Files**: `src/server/audioProcessing/{types.ts,index.ts,replicateProvider.ts}`
+(provider abstraction — `AudioProcessingProvider` interface, `create`/`get`/
+`getResult`, `getAudioProcessingProvider()` factory reading
+`AUDIO_PROCESSING_PROVIDER`, default `"replicate"`), `src/app/api/
+noise-reduction/{route.ts,[jobId]/route.ts,[jobId]/result/route.ts}` (three
+routes mirroring the provider's three methods 1:1, modeled directly on
+`api/tts/route.ts`), `src/hooks/useNoiseReduction.ts` (client pipeline —
+extract clip audio → encode → POST → poll → fetch result → decode → commit;
+near-direct copy of `useRemoveSilence.ts`'s shape, single `processingClipId`/
+`isProcessingRef`, app-wide single-flight), `src/hooks/useToastQueue.ts` (new
+— shared FIFO queue in front of `ui/Toast.tsx` so silence removal's and
+noise reduction's own outcomes don't clobber each other mid-display),
+`src/utils/audioBufferSlice.ts` (new — `sliceChannelData`/`extractClipAudio`,
+the clip-audio-extraction helper the plan called for; also now used by
+`silenceDetection.ts`'s own RMS scan, replacing its inline duplicate of the
+same loop), `src/utils/apiResponse.ts` (new — `errorResponse`, now shared by
+both `api/tts/route.ts` and the three routes above instead of each defining
+its own copy). Wired into `src/components/clip-menu/ClipActionsOverlay.tsx`
+(`"reduce-noise"` action, immediately after `"remove-silence"`, same
+`!clip.midiNotes` gate, its own independent `noiseReductionClipId` prop) and
+`src/components/timeline/EditorShell.tsx` (owns `useNoiseReduction()`
+alongside `useRemoveSilence()`, for the identical reason documented there:
+both hooks' state changes independently of any store `commit()`, and
+`EditorShell` sits below `TimelineStage` — the one place that doesn't force
+a spurious full engine rebuild on every unrelated render).
+
+**Non-blocking, precisely**: unlike silence removal's full-editor overlay,
+the only things a running noise-reduction job disables are (1) "Reduce
+noise" on every clip's menu, app-wide, and (2) the Export button — nothing
+else. Drag, trim, delete, play, undo/redo all keep working, per the plan's
+own explicit design goal (`resemble-enhance` averages ~70-80s/run). Export is
+the one deliberate exception, added in the plan's own "Guards worth
+including" section: an offline export render temporarily swaps Tone's global
+context, and this app's established convention for an unproven-but-plausible
+Tone-context race is to close the *window* structurally rather than rely on
+it being provably safe (same treatment `isExporting`'s own gate already
+gets) — `EditorShell.tsx` passes `exportDisabled={isExporting ||
+isReducingNoise}` to `TopBar.tsx`, kept separate from `isExporting` itself so
+the button's label only ever reads "Exporting…" while actually exporting.
+Whether the interaction is actually harmful is **still unverified** (no real
+offline-export-during-a-real-noise-reduction-job run has happened) — the
+gate ships anyway because it's cheap, per the plan's own reasoning, not
+because the race was confirmed or ruled out.
+
+**Real findings from building this** (some are bugs caught before they
+shipped, one is a corrected plan assumption — kept distinct from each other
+below, same discipline the rest of this file uses):
+
+1. **The toast queue's first draft violated this repo's
+   `eslint-plugin-react-hooks` "set-state-in-effect" rule.** The natural way
+   to write "advance to the next queued message" is a `useEffect` that calls
+   `setCurrent(queue[0])` when `current` is `null` and `queue` isn't — this
+   repo's ESLint config flags a synchronous `setState` call inside an
+   effect body as cascading-render-prone. Fixed by dropping the separate
+   `current` state entirely: `current` is just `queue[0]`, purely derived,
+   and `dismiss` shifts the queue — there's no separate "advance" step left
+   to need an effect for.
+2. **Replicate's own `Status` type includes `"aborted"`** (confirmed by
+   reading the installed `replicate` package's own `.d.ts`), a state the
+   plan's "reuse Replicate's status vocabulary verbatim" note didn't account
+   for (it named only the five this app's `AudioProcessingJobStatus` models).
+   `replicateProvider.ts` folds it into `"failed"` rather than widening the
+   shared interface for one provider-specific extra state every other
+   provider would then have to also invent an opinion about.
+3. **Corrected plan assumption, not a bug**: the plan's "File delivery"
+   section assumed `replicateProvider.ts` would need to hand-roll a
+   `POST /v1/files` call before `predictions.create`, since Replicate
+   requires files over 256KB to be a URL, not a data URI. Reading the
+   installed SDK's own source (`replicate/lib/util.js`'s
+   `transformFileInputs`) directly shows it already auto-uploads any
+   `Blob`/`Buffer` value found anywhere in `input` via its own Files API
+   before sending the request — passing `input.input_audio` as a `Blob` is
+   enough. `fileEncodingStrategy: "upload"` is pinned explicitly (rather
+   than trusting the SDK's own `"default"` strategy, which silently falls
+   back to a data URI on a failed upload) so a failed upload fails loudly
+   instead of retrying as a data URI that's likely to be rejected anyway for
+   a real clip's size.
+4. **The plan's "mock the provider or global.fetch" verification note
+   needed a concrete seam that didn't exist yet.** Mocking Replicate's real
+   wire format directly (a Files-API upload, `predictions.create`/`.get()`,
+   a final fetch of the delivery URL) would mean asserting against a schema
+   this session couldn't live-verify — no `REPLICATE_API_TOKEN` was
+   available (the same gap in the plan's own "Suggested build order" step 1,
+   still open — see "Not yet done" below). Added
+   `__setAudioProcessingProviderForTesting()` to
+   `server/audioProcessing/index.ts`'s factory: a small, explicitly-named,
+   documented test-only escape hatch, not settable via any real env
+   var/config path. `e2e/noiseReductionRoute.spec.ts` injects an in-memory
+   fake provider through it, the same role `e2e/ttsRoute.spec.ts`'s
+   `global.fetch` mock plays for `api/tts/route.ts`, one layer further out.
+5. **TypeScript allows an interface implementation to declare fewer
+   parameters than the interface method it satisfies** (safe
+   contravariantly) — used in the test fake above (`getJobStatus()`/
+   `getResult()` take no `jobId` at all, since the fake only ever tracks one
+   job) to avoid an unused-parameter ESLint warning without introducing this
+   repo's first suppression comment (see the TTS section's own "zero
+   existing suppressions anywhere" precedent).
+
+**DRY reuse across this pass, not just within the new feature**: beyond
+`audioBufferSlice.ts`/`apiResponse.ts` above, `utils/wavEncode.ts` gained
+`readWavDurationSeconds` (co-located with `encodeWavPcm16` since it depends
+on the exact same fixed 44-byte-header format) — used by
+`api/noise-reduction/route.ts`'s max-duration guard, and works server-side
+with no `AudioContext` needed since it only reads header bytes via
+`DataView`. `e2e/helpers.ts` gained `clipActionsButtonFor` (extracted out of
+`silenceRemoval.spec.ts`, which defined it locally first) once
+`noiseReduction.spec.ts` needed the identical per-clip menu-button lookup —
+both spec files import the one copy now.
+
+**Not yet done / disclosed gaps** (matches this repo's existing convention,
+not silently scoped out):
+
+- **The plan's Step 1 spike — deciding `resemble-ai/resemble-enhance` vs.
+  `lucataco/resemble-enhance` by fetching both models' live
+  `openapi_schema`s — never ran**, for the same reason threaded through this
+  section: no `REPLICATE_API_TOKEN`. `replicateProvider.ts` defaults to
+  `lucataco/resemble-enhance` (the listing whose schema is confirmed from
+  source, per the plan), overridable via `REPLICATE_NOISE_REDUCTION_MODEL`
+  without a code change once that spike does run.
+- **No real Replicate call has ever been made** — every test (route-level
+  and browser-level) runs against a fake/mocked provider. Field names
+  (`input_audio`, `denoise_flag`), the assumption that `output` is
+  `[denoised, enhanced]` in that order, and the Files-API auto-upload
+  behavior are all confirmed by reading source (the Cog wrapper's
+  `predict.py`, the installed `replicate` package's own `.d.ts`/`lib/`) —
+  not by an actual round-trip.
+- Job tracking lost on reload/tab-close mid-job (Replicate's own prediction
+  still finishes server-side; nothing polls it again) — disclosed in the
+  plan as not attempted for v1, unchanged here.
+- No cancel affordance (`POST /v1/predictions/{id}/cancel`) — plan's own
+  "stretch, not core," not built.
+- The Export-during-noise-reduction Tone-context interaction (see
+  "Non-blocking, precisely" above) stays genuinely unverified, not
+  confirmed-safe or confirmed-unsafe — the gate ships regardless, per the
+  plan's own "cheap enough to include even though unverified" reasoning.
+
+**Committed coverage**: `e2e/noiseReductionRoute.spec.ts` (11 tests, imports
+the three route handlers directly and injects the fake provider from finding
+4 above — validation before ever calling the provider, missing-token 500,
+provider-thrown-error 502, status/result forwarding) and
+`e2e/noiseReduction.spec.ts` (5 tests, mocks `**/api/noise-reduction*` via
+`page.route` the way `tts.spec.ts` mocks `**/api/tts`: a successful job
+replaces the clip and undo restores the original in one step; "Reduce noise"
+disables app-wide while a job runs but drag/duplicate/undo/play on a
+*different* clip and Export's disabled state all behave correctly during
+that window; trimming the *target* clip mid-job discards the result with the
+documented message; moving a *different* clip mid-job does not trigger a
+discard; a failed job shows an error toast and leaves the clip untouched).
+Full suite (85 tests across every spec file) passed against a fresh prod
+build, with the one pre-existing flaky retry on the corrupt-record test
+(the already-documented raw-`indexedDB.open()`-under-Playwright timing quirk
+two sections up, unrelated to this feature) — the same isolated `describe`
+with `retries: 2` treatment that test already had. `tsc --noEmit` and
+`eslint` both clean.
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -1170,6 +1349,20 @@ bug 8) — not just the small clips the committed suite uses.
   "Silence removal" below). It was already resolved transitively via
   `browser`/`engine`/`ui-components` before this, so nothing new actually
   installs; only `package.json` gained a manifest entry.
+- **`REPLICATE_API_TOKEN` must be set (server-only, never `NEXT_PUBLIC_*`)
+  for "Reduce noise" to work.** Same precedent `CARTESIA_API_KEY` already
+  established: read from `process.env` by every route under
+  `src/app/api/noise-reduction/`, unset → a clean 500, not a mysterious
+  failure. Get a token from Replicate's dashboard; put it in `.env.local`
+  (already gitignored, same as `CARTESIA_API_KEY`). Not required for
+  anything else in the app. See "Noise reduction (Replicate)" above — as of
+  this writing, no token had been available in this session, so the feature
+  is implemented and tested against mocks/fakes but not yet run against the
+  real Replicate API.
+- **`replicate` (the official npm SDK) is a direct dependency**, used only
+  inside `server/audioProcessing/replicateProvider.ts` (never imported
+  elsewhere, so swapping providers later can't drag it along) — see "Noise
+  reduction (Replicate)" above.
 
 ## Library findings worth remembering
 

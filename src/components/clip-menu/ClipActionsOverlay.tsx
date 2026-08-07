@@ -94,6 +94,12 @@ interface ClipActionsOverlayProps {
    *  app-wide single-flight, not per-clip — see useRemoveSilence.ts), and
    *  drives the busy label on the one matching clip. */
   processingClipId: string | null;
+  onReduceNoise: (trackId: string, clip: AudioClip) => void;
+  /** Same shape as processingClipId above, for the independent single-flight
+   *  useNoiseReduction.ts owns — a silence-removal job in flight doesn't
+   *  disable "Reduce noise" and vice versa, each only disables its own
+   *  action app-wide. See NOISE_REDUCTION_PLAN.md. */
+  noiseReductionClipId: string | null;
   /** Threaded through to useFadeDragHandlers — see its own doc comment and
    *  transport/PlayButton.tsx / timeline/ClipDragLayer.tsx for the play()/
    *  rebuild race this guards against. A fade-drag commit reaches
@@ -167,6 +173,8 @@ export function ClipActionsOverlay({
   onDeleteClip,
   onRemoveSilence,
   processingClipId,
+  onReduceNoise,
+  noiseReductionClipId,
   playPendingRef,
   scrollEl,
   scissors,
@@ -391,6 +399,18 @@ export function ClipActionsOverlay({
         disabled: processingClipId !== null,
         onSelect: () => {
           onRemoveSilence(track.id, clip);
+          closeAndReset();
+        },
+      });
+      actions.push({
+        id: "reduce-noise",
+        label: noiseReductionClipId === clip.id ? "Reducing noise…" : "Reduce noise",
+        // App-wide single-flight (useNoiseReduction.ts), independent of
+        // remove-silence's own — every clip's item disables while any one
+        // noise-reduction job is running, not just this one.
+        disabled: noiseReductionClipId !== null,
+        onSelect: () => {
+          onReduceNoise(track.id, clip);
           closeAndReset();
         },
       });

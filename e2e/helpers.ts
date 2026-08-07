@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import type { UploadFile } from "./fixtures";
 
 /**
@@ -204,4 +204,17 @@ export async function rebuildsEngine(page: Page, action: () => Promise<void>): P
 
   const after = await page.evaluate(() => (window as unknown as RebuildProbeWindow).__rebuildCount);
   return after > before;
+}
+
+/**
+ * Resolves a specific clip's own "..." actions-menu trigger button, via
+ * ClipActionsMenu.tsx's `data-clip-actions-for` attribute (deliberately not
+ * `data-clip-id` — see that component's own doc comment on why the two
+ * attributes can't be the same). Shared by every spec that opens a per-clip
+ * menu (silenceRemoval.spec.ts, noiseReduction.spec.ts) — extracted here
+ * rather than duplicated once a second spec needed the exact same lookup.
+ */
+export async function clipActionsButtonFor(page: Page, clip: Locator) {
+  const clipId = await clip.getAttribute("data-clip-id");
+  return page.locator(`button[data-clip-actions-for="${clipId}"]`);
 }

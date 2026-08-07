@@ -1,7 +1,15 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import * as fs from "fs";
 import { makeSineWavFile, makeSegmentedWavFile, makeStereoSegmentedWavFile, type WavSegment } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, rebuildsEngine, readWav } from "./helpers";
+import {
+  SELECTORS,
+  waitForWaveformReady,
+  uploadFiles,
+  gotoEditor,
+  rebuildsEngine,
+  readWav,
+  clipActionsButtonFor,
+} from "./helpers";
 
 const UNDO = { name: "Undo" } as const;
 const REMOVE_SILENCE = { name: /^Remove silence$|^Removing silence…$/ } as const;
@@ -22,11 +30,6 @@ const SEGMENTS: WavSegment[] = [
 // each side of both interior silence gaps (2 gaps * 2 sides * 0.1s) — see
 // SILENCE_REMOVAL_PLAN.md's algorithm section for the padding rule.
 const EXPECTED_KEPT_SECONDS = 3 * 1 + 2 * 2 * 0.1;
-
-async function clipActionsButtonFor(page: Page, clip: ReturnType<Page["locator"]>) {
-  const clipId = await clip.getAttribute("data-clip-id");
-  return page.locator(`button[data-clip-actions-for="${clipId}"]`);
-}
 
 /**
  * Per-clip silence removal (see SILENCE_REMOVAL_PLAN.md) — energy/RMS-based,

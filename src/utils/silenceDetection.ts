@@ -2,6 +2,7 @@
 // scope. See SILENCE_REMOVAL_PLAN.md for the full design.
 
 import { concatenateAudioData, createAudioBuffer } from "@waveform-playlist/core";
+import { sliceChannelData } from "./audioBufferSlice";
 
 export interface SilenceDetectionOptions {
   /** Analysis window length in seconds. Every step below operates in units
@@ -215,10 +216,7 @@ export function spliceOutSilence(
   options?: SilenceDetectionOptions
 ): SpliceOutSilenceResult {
   const channelCount = sourceBuffer.numberOfChannels;
-  const channelData: Float32Array[] = [];
-  for (let ch = 0; ch < channelCount; ch++) {
-    channelData.push(sourceBuffer.getChannelData(ch).subarray(offsetSamples, offsetSamples + durationSamples));
-  }
+  const channelData = sliceChannelData(sourceBuffer, offsetSamples, durationSamples);
 
   const keepRanges = detectKeepRanges(channelData, sourceBuffer.sampleRate, options);
 

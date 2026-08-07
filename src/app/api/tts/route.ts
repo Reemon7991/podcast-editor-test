@@ -1,4 +1,5 @@
 import { isKnownCartesiaVoiceId, MAX_TTS_TEXT_LENGTH } from "../../../utils/cartesiaVoices";
+import { errorResponse } from "../../../utils/apiResponse";
 
 /**
  * Backend-owned TTS generation — see TTS_CARTESIA_PLAN.md for the full
@@ -53,10 +54,6 @@ function sleep(ms: number): Promise<void> {
 interface GenerateSpeechRequestBody {
   text?: unknown;
   voiceId?: unknown;
-}
-
-function errorResponse(message: string, status: number): Response {
-  return Response.json({ error: message }, { status });
 }
 
 /** One attempt against Cartesia, with its own AbortController/timeout — a

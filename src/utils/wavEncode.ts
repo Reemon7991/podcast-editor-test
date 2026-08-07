@@ -51,3 +51,21 @@ export function encodeWavPcm16(buffer: AudioBuffer): Blob {
 
   return new Blob([arrayBuffer], { type: "audio/wav" });
 }
+
+/**
+ * Reads just enough of a fixed 44-byte-header 16-bit PCM WAV (the format
+ * encodeWavPcm16 above always produces, and the format
+ * useNoiseReduction.ts's client pipeline always uploads) to compute its
+ * duration — no AudioContext/decodeAudioData needed, so this also works
+ * server-side (api/noise-reduction/route.ts's own max-duration guard),
+ * where no AudioContext exists at all.
+ */
+export function readWavDurationSeconds(bytes: ArrayBuffer): number {
+  const view = new DataView(bytes);
+  const numChannels = view.getUint16(22, true);
+  const sampleRate = view.getUint32(24, true);
+  const dataSize = view.getUint32(40, true);
+  const bytesPerSample = 2; // 16-bit PCM, matches encodeWavPcm16 above
+  if (numChannels === 0 || sampleRate === 0) return 0;
+  return dataSize / bytesPerSample / numChannels / sampleRate;
+}
