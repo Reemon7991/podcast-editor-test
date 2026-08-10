@@ -134,6 +134,29 @@ export function EditorShell({
       ? selectedClipRaw
       : null;
 
+  // Resolves `selectedClip`'s ids to the actual track/clip objects — needed
+  // for the top-bar "Remove silence" button below, since removeSilence()
+  // (useRemoveSilence.ts) takes a real AudioClip, not just an id. Re-resolved
+  // fresh every render from the live `tracks` array (same approach
+  // ClipActionsOverlay.tsx already uses for its own selection ring), so it
+  // can't go stale across a drag/undo/split the way a cached reference could.
+  const selectedTrackForToolbar = selectedClip
+    ? tracks.find((t) => t.id === selectedClip.trackId)
+    : undefined;
+  const selectedClipForToolbar = selectedTrackForToolbar?.clips.find(
+    (c) => c.id === selectedClip?.clipId
+  );
+  // Audio-only feature — MIDI clips have nothing for it to act on, same
+  // guard ClipActionsOverlay.tsx's per-clip menu already applies. Not
+  // reachable via this app's UI today (no MIDI import path exists), kept for
+  // parity with that guard rather than assuming it can never matter.
+  const canRemoveSilenceSelected = !!selectedClipForToolbar && !selectedClipForToolbar.midiNotes;
+  const handleRemoveSilenceSelected = () => {
+    if (selectedTrackForToolbar && selectedClipForToolbar) {
+      removeSilence(selectedTrackForToolbar.id, selectedClipForToolbar);
+    }
+  };
+
   // Registers this provider's actual stop()/isPlaying with the project store
   // (see projectStore.ts's own doc comment on stopIfPlaying/
   // registerStopIfPlaying) so `commit`/`undo`/`redo` — called from outside
@@ -284,6 +307,9 @@ export function EditorShell({
           onSplitSelected={scissors.activate}
           onDuplicateClip={onDuplicateClip}
           onDeleteClip={onDeleteClip}
+          onRemoveSilenceSelected={handleRemoveSilenceSelected}
+          canRemoveSilenceSelected={canRemoveSilenceSelected}
+          isRemovingSilence={isRemovingSilence}
         />
       </div>
       <div className="relative overflow-hidden rounded-xl border border-[var(--border)]">

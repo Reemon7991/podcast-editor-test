@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 export interface ClipMenuAction {
@@ -10,6 +10,15 @@ export interface ClipMenuAction {
   disabled?: boolean;
   /** Styles the item as a destructive action (e.g. "Delete"). */
   destructive?: boolean;
+  /** Rendered left of the label — every action in this app's menus supplies
+   *  one (see ClipActionIcons.tsx), kept optional here since this component
+   *  is a generic, non-clip-specific primitive (see its own doc comment). */
+  icon?: ReactNode;
+  /** Draws a thin divider above this item, with extra spacing on both
+   *  sides — groups a run of related actions apart from whatever precedes
+   *  them (e.g. ClipActionsOverlay.tsx separates "Generate clip (AI)"/
+   *  "Remove silence" from the plain edit actions above them). */
+  separatorBefore?: boolean;
 }
 
 interface ClipActionsMenuProps {
@@ -154,26 +163,35 @@ export function ClipActionsMenu({ actions, style, onOpenChange, clipId }: ClipAc
             role="menu"
             onPointerDown={(e) => e.stopPropagation()}
             style={{ position: "fixed", top: dropdownPos.top, left: dropdownPos.left, zIndex: 10000 }}
-            className="min-w-[160px] overflow-hidden rounded-xl border border-[var(--border)] bg-white py-1 shadow-lg"
+            className="min-w-[160px] overflow-hidden rounded-xl border border-[var(--border)] bg-white py-1.5 shadow-lg"
           >
             {actions.map((action) => (
-              <button
-                key={action.id}
-                type="button"
-                role="menuitem"
-                disabled={action.disabled}
-                onClick={() => {
-                  action.onSelect();
-                  setOpen(false);
-                }}
-                className={`block w-full px-3 py-1.5 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
-                  action.destructive
-                    ? "text-red-600 hover:bg-red-50"
-                    : "text-[var(--foreground)] hover:bg-[var(--accent-purple-50)]"
-                }`}
-              >
-                {action.label}
-              </button>
+              <div key={action.id}>
+                {action.separatorBefore && (
+                  <div role="separator" className="my-1.5 border-t border-[var(--border)]" />
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={action.disabled}
+                  onClick={() => {
+                    action.onSelect();
+                    setOpen(false);
+                  }}
+                  className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
+                    action.destructive
+                      ? "text-red-600 hover:bg-red-50"
+                      : "text-[var(--foreground)] hover:bg-[var(--accent-purple-50)]"
+                  }`}
+                >
+                  {action.icon && (
+                    <span className="flex shrink-0 items-center justify-center opacity-80">
+                      {action.icon}
+                    </span>
+                  )}
+                  {action.label}
+                </button>
+              </div>
             ))}
           </div>,
           document.body

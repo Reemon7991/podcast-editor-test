@@ -12,6 +12,7 @@ import {
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
 import { FadeHandles } from "./FadeHandles";
 import { TrimHandleBars } from "./TrimHandleBars";
+import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon } from "./ClipActionIcons";
 import type { SelectedClip } from "./ClipActionsToolbar";
 import type { UseScissorsSplitResult } from "../../hooks/useScissorsSplit";
 import { useFadeDragHandlers } from "../../hooks/useFadeDragHandlers";
@@ -362,6 +363,7 @@ export function ClipActionsOverlay({
       {
         id: "split",
         label: "Split",
+        icon: <SplitIcon />,
         onSelect: () => {
           scissors.activate();
           closeAndReset();
@@ -370,12 +372,23 @@ export function ClipActionsOverlay({
       {
         id: "duplicate",
         label: "Duplicate",
+        icon: <DuplicateIcon />,
         onSelect: () => {
           // Duplicate/delete both go through `commit`, which stops playback
           // first if needed on its own now — see projectStore.ts's
           // `stopIfPlaying`/`registerStopIfPlaying` doc comment. No local guard
           // needed here anymore.
           onDuplicateClip(track.id, clip.id);
+          closeAndReset();
+        },
+      },
+      {
+        id: "delete",
+        label: "Delete",
+        icon: <DeleteIcon />,
+        destructive: true,
+        onSelect: () => {
+          onDeleteClip(track.id, clip.id);
           closeAndReset();
         },
       },
@@ -386,6 +399,11 @@ export function ClipActionsOverlay({
       actions.push({
         id: "remove-silence",
         label: processingClipId === clip.id ? "Removing silence…" : "Remove silence",
+        icon: <RemoveSilenceIcon />,
+        // Visually separated (a thin divider, via separatorBefore) from the
+        // plain edit actions above — this operates on the whole clip's audio
+        // rather than just moving/removing it outright.
+        separatorBefore: true,
         // App-wide single-flight (useRemoveSilence.ts), not per-clip — every
         // clip's item disables while any one is running, not just this one.
         disabled: processingClipId !== null,
@@ -395,16 +413,6 @@ export function ClipActionsOverlay({
         },
       });
     }
-
-    actions.push({
-      id: "delete",
-      label: "Delete",
-      destructive: true,
-      onSelect: () => {
-        onDeleteClip(track.id, clip.id);
-        closeAndReset();
-      },
-    });
 
     return actions;
   };
