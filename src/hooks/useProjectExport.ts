@@ -37,6 +37,17 @@ export function useProjectExport(tracks: ClipTrack[], trackStates: TrackMixerSta
   const { exportWav, isExporting, error } = useExportWav();
 
   const exportProject = useCallback(() => {
+    // Nothing to render at all — bail before touching exportWav/isExporting
+    // so no spinner/overlay flashes for an export that was never going to
+    // produce anything. Distinct from (and checked before) the existing
+    // solo/mute-driven "audibleTracks is empty" case below, which is a real
+    // render that happens to contain silence, not an empty timeline.
+    const hasClips = tracks.some((track) => track.clips.length > 0);
+    if (!hasClips) {
+      alert("Your podcast is empty, nothing to export.");
+      return Promise.resolve();
+    }
+
     const indices = audibleIndices(trackStates);
     const audibleTracks = indices.map((i) => tracks[i]);
     const audibleStates = indices.map((i) => ({

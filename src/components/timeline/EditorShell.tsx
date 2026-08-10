@@ -25,12 +25,16 @@ import { useRemoveSilence } from "../../hooks/useRemoveSilence";
 import { resolveClipAt } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
+import { useDeleteClipShortcut } from "../../hooks/useDeleteClipShortcut";
 import { useProjectExport } from "../../hooks/useProjectExport";
 import { registerStopIfPlaying } from "../../store/projectStore";
 
 interface EditorShellProps {
   /** Undefined hides every track's close button — see TimelineStageProps. */
   onRemoveTrack: ((trackIndex: number) => void) | undefined;
+  /** True while a clip is decoding after an upload/drop — see
+   *  TimelineStageProps' own doc comment. */
+  isImportingClip: boolean;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
@@ -61,6 +65,7 @@ interface EditorShellProps {
  */
 export function EditorShell({
   onRemoveTrack,
+  isImportingClip,
   onAddTrack,
   onAddFilesToTrack,
   onDuplicateClip,
@@ -155,9 +160,12 @@ export function EditorShell({
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
-  // same isReady/isExporting/isRemovingSilence signals already gating
-  // TopBar/BottomBar below.
-  useUndoRedoShortcut(isReady && !isExporting && !isRemovingSilence);
+  // same isReady/isExporting/isRemovingSilence/isImportingClip signals
+  // already gating TopBar/BottomBar below.
+  const editorBusy = !isReady || isExporting || isRemovingSilence || isImportingClip;
+  useUndoRedoShortcut(!editorBusy);
+  // Delete/Backspace deletes the selected clip — see useDeleteClipShortcut.ts.
+  useDeleteClipShortcut(!editorBusy, selectedClip, onDeleteClip);
 
   // Ref updates must happen outside render (React disallows mutating a ref's
   // `.current` during render).
@@ -259,14 +267,12 @@ export function EditorShell({
        *  post-rebuild one) that throws "TonePlayout not initialized" if Play
        *  is pressed mid-rebuild. isReady is the provider's own rebuild-done
        *  signal — gating the transport bar on it closes that window. Also
-       *  gated on isRemovingSilence, same treatment as isExporting — see the
-       *  editing overlay below. */}
+       *  gated on isRemovingSilence/isImportingClip, same treatment as
+       *  isExporting — see the editing overlays below. */}
       <div
         data-testid="top-bar"
-        className={
-          isReady && !isExporting && !isRemovingSilence ? undefined : "pointer-events-none opacity-50"
-        }
-        aria-disabled={!isReady || isExporting || isRemovingSilence}
+        className={editorBusy ? "pointer-events-none opacity-50" : undefined}
+        aria-disabled={editorBusy}
       >
         <TopBar
           onAddFilesToTrack={onAddFilesToTrack}
@@ -335,6 +341,18 @@ export function EditorShell({
             <LoadingState message="Removing silence…" />
           </div>
         )}
+        {/* Blocks editing while an uploaded/dropped clip is still decoding —
+         *  same full-editor treatment as export/silence removal above, so a
+         *  large file doesn't leave the user waiting with no indication
+         *  anything is happening. */}
+        {isImportingClip && (
+          <div
+            data-testid="clip-import-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Loading new clip…" />
+          </div>
+        )}
       </div>
       {/* Fixed to the viewport, not the page's own scroll — so play/pause
        *  (and the rest of the transport controls) always stays reachable
@@ -350,9 +368,9 @@ export function EditorShell({
       <div
         data-testid="transport-bar"
         className={`fixed inset-x-0 bottom-0 z-[200] px-6 pb-4 ${
-          isReady && !isExporting && !isRemovingSilence ? "" : "pointer-events-none opacity-50"
+          editorBusy ? "pointer-events-none opacity-50" : ""
         }`}
-        aria-disabled={!isReady || isExporting || isRemovingSilence}
+        aria-disabled={editorBusy}
       >
         <BottomBar playPendingRef={playPendingRef} />
       </div>

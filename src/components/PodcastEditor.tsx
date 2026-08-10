@@ -111,6 +111,7 @@ export function PodcastEditor() {
         // see handleRemoveTrackByIndex's doc comment.
         onRemoveTrack={tracks.length > 1 ? handleRemoveTrackByIndex : undefined}
         deferEngineRebuild={isLoading}
+        isImportingClip={isLoading}
         onAddTrack={addTrack}
         onAddFilesToTrack={addFilesToTrack}
         onDuplicateClip={duplicateClip}
