@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as Tone from "tone";
-import { loadProject, loadAssets } from "../utils/persistence";
+import { loadProject, loadAssets, loadTranscripts, loadCompressedAsset } from "../utils/persistence";
 import { registerAsset } from "../utils/assetRegistry";
 import { useProjectStore } from "../store/projectStore";
+import { useTranscriptStore } from "../store/transcriptStore";
+import { runTranscriptionPipeline } from "../utils/transcription";
 import type { TrackMeta } from "../utils/types";
 
 /**
@@ -65,6 +67,7 @@ export function useProjectHydration(): {
 
         const audioContext = Tone.getContext().rawContext as AudioContext;
         const decodedAssetIds = new Set<string>();
+        const sampleRateByAssetId = new Map<string, number>();
         await Promise.all(
           assetIds.map(async (assetId) => {
             const blob = blobsByAssetId.get(assetId);
@@ -79,8 +82,37 @@ export function useProjectHydration(): {
               const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
               registerAsset(audioBuffer, assetId);
               decodedAssetIds.add(assetId);
+              sampleRateByAssetId.set(assetId, audioBuffer.sampleRate);
             } catch (err) {
               console.error(`[podcast-editor] Failed to decode asset "${assetId}"`, err);
+            }
+          })
+        );
+
+        // Repopulate transcriptStore for every asset that survived hydration
+        // — it's in-memory only (see its own doc comment on why it's
+        // deliberately never wired into projectStore/TimelineStage), so
+        // without this, search/filler-word removal would silently show "no
+        // transcript" for every asset after every reload. Any transcript
+        // still "pending"/"transcribing" (tab closed mid-flight) is
+        // re-kicked against its already-persisted compressed chunks — cheap,
+        // no re-decode/re-compress needed.
+        const decodedAssetIdList = Array.from(decodedAssetIds);
+        const transcriptsByAssetId = await loadTranscripts(decodedAssetIdList);
+        const { setTranscript } = useTranscriptStore.getState();
+        for (const transcript of transcriptsByAssetId.values()) {
+          setTranscript(transcript);
+        }
+        await Promise.all(
+          decodedAssetIdList.map(async (assetId) => {
+            const transcript = transcriptsByAssetId.get(assetId);
+            if (!transcript || (transcript.status !== "pending" && transcript.status !== "transcribing")) {
+              return;
+            }
+            const chunks = await loadCompressedAsset(assetId);
+            const sampleRate = sampleRateByAssetId.get(assetId);
+            if (chunks && chunks.length > 0 && sampleRate) {
+              void runTranscriptionPipeline(assetId, chunks, sampleRate);
             }
           })
         );

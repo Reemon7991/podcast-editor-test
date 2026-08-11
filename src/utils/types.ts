@@ -13,3 +13,46 @@ import type { AudioClip, ClipTrack } from "@waveform-playlist/browser";
 export type ClipMeta = Omit<AudioClip, "audioBuffer"> & { assetId: string };
 
 export type TrackMeta = Omit<ClipTrack, "clips"> & { clips: ClipMeta[] };
+
+/**
+ * One word from a Whisper transcript — seconds are relative to the
+ * *original asset's own start* (0 = start of the uploaded/generated file),
+ * never to a clip or the project timeline. See
+ * TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's "Context" section for why this
+ * is the one thing that makes a transcript survive move/trim/split for free
+ * via ClipMeta's existing assetId/offsetSamples/durationSamples/startSample
+ * fields.
+ */
+export interface TranscriptWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+export type TranscriptStatus = "pending" | "transcribing" | "done" | "failed";
+
+/** One per assetId, keyed by assetId in both transcriptStore.ts (in-memory)
+ *  and the `transcripts` IndexedDB store (persisted) — see persistence.ts. */
+export interface AssetTranscript {
+  assetId: string;
+  status: TranscriptStatus;
+  /** null until status is "done". */
+  words: TranscriptWord[] | null;
+  /** Set when some chunks succeeded and others failed — status is still
+   *  "done" in that case (the words that did come back are still usable),
+   *  this just discloses the gap rather than hiding it. */
+  partialFailure?: boolean;
+  error?: string;
+  updatedAt: number;
+}
+
+/** One Opus-encoded, duration-bounded segment of a compressed asset — see
+ *  utils/audioCompression.ts. `startSample`/`endSample` are in the
+ *  *original* asset's sample space (its own native sampleRate), matching
+ *  TranscriptWord's own asset-relative coordinate space, even though the
+ *  blob itself is encoded at 16kHz mono. */
+export interface CompressedChunk {
+  startSample: number;
+  endSample: number;
+  blob: Blob;
+}
