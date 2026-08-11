@@ -310,6 +310,7 @@ export function EditorShell({
           onRemoveSilenceSelected={handleRemoveSilenceSelected}
           canRemoveSilenceSelected={canRemoveSilenceSelected}
           isRemovingSilence={isRemovingSilence}
+          onSelectClip={setSelectedClip}
         />
       </div>
       <div className="relative overflow-hidden rounded-xl border border-[var(--border)]">

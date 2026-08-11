@@ -254,7 +254,7 @@ network fallback), and the first word after the gap shifted from 4.99s to
 2.21s post-splice — a ~2.78s shift, matching the ~3s gap minus the padding
 silence-removal keeps on each side of a cut. Zero console/page errors.
 
-## Phase 5 — Audio search
+## Phase 5 — Audio search (DONE, verified live)
 
 Shared foundation: `src/hooks/useTranscriptIndex.ts` — for every clip on
 every track, reads `transcriptStore`, filters words whose `[start,end)`

@@ -7,6 +7,7 @@ import { UndoRedoButtons } from "../transport/UndoRedoButtons";
 import { ClipActionsToolbar, type SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { MenuButton } from "../ui/MenuButton";
 import { GenerateSpeechModal } from "../tts/GenerateSpeechModal";
+import { SearchButton } from "../search/SearchButton";
 
 interface TopBarProps {
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
@@ -23,6 +24,10 @@ interface TopBarProps {
   onRemoveSilenceSelected: () => void;
   canRemoveSilenceSelected: boolean;
   isRemovingSilence: boolean;
+  /** Selects a clip found via search — EditorShell.tsx's own setSelectedClip,
+   *  threaded down the same way every other clip-mutation callback already
+   *  is. See search/SearchButton.tsx. */
+  onSelectClip: (clip: SelectedClip) => void;
 }
 
 /**
@@ -44,6 +49,7 @@ export function TopBar({
   onRemoveSilenceSelected,
   canRemoveSilenceSelected,
   isRemovingSilence,
+  onSelectClip,
 }: TopBarProps) {
   const { currentTime } = usePlaybackAnimation();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +83,7 @@ export function TopBar({
         <span className="text-sm font-semibold text-[var(--foreground)]">Podcast Editor</span>
         <div className="h-5 w-px bg-[var(--border)]" />
         <UndoRedoButtons />
+        <SearchButton onSelectClip={onSelectClip} />
       </div>
 
       <div className="flex flex-1 items-center justify-center">
