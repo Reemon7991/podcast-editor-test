@@ -1180,7 +1180,9 @@ built) breaks this, since it mints a new content-hash `assetId` — see the
 remap step below.
 
 **Files**: `src/utils/audioCompression.ts` (chunk-then-Opus-encode, via
-`mediabunny`), `src/utils/transcription.ts` (`runTranscriptionPipeline` —
+`mediabunny`), `src/utils/concurrency.ts` (`settleWithConcurrencyLimit` —
+generic, Node-unit tested `Promise.allSettled`-with-a-cap helper; see below),
+`src/utils/transcription.ts` (`runTranscriptionPipeline` —
 plain function, not a hook, called from both the upload and TTS paths),
 `src/app/api/transcribe/route.ts` (holds `OPENROUTER_API_KEY`, mirrors
 `api/tts/route.ts`'s retry-on-429/5xx-never-4xx shape exactly), `src/utils/
@@ -1238,6 +1240,20 @@ as an earlier docs pass assumed. Word-level timestamps confirmed accurate
 against a known phrase, both on a raw WAV and on the actual compressed Opus
 file this pipeline produces.
 
+**Chunk requests are concurrency-capped at 3, and the merge across chunks is
+verified live, not just reasoned about** — both added in a post-Phase-5
+self-review. A long asset (18 chunks for a 3-hour podcast at the default
+10-min chunk size) firing every chunk at OpenRouter simultaneously is a real
+way to trigger rate limiting; `transcription.ts` now runs chunk requests
+through `concurrency.ts`'s cap instead of a bare `Promise.allSettled`. The
+original Phase 0-3 pass never actually exercised >1 chunk (every test clip
+produced exactly one) — closed by temporarily lowering
+`CHUNK_DURATION_SECONDS` to 8s and uploading a real ~12.6s clip with 3
+chapter-marker checkpoints spanning the boundary: exactly 2 requests fired,
+36 words merged in correct order, and the marker spoken *after* the boundary
+landed at 9.5s, not reset near 0 — confirming the chunk-offset math. Constant
+reverted afterward; a full rebuild confirmed unchanged default behavior.
+
 **Re-transcription for spliced assets (silence removal today; filler-word
 removal will hit the same path once built): remap, not re-transcribe.**
 `silenceDetection.ts`'s `spliceOutSilence` now also returns `keepRanges`;
@@ -1279,7 +1295,14 @@ other clip-mutation callback already is. Result-card timestamps use the
 own, unrelated precision and would have been an app-wide format change).
 Matched text renders in a real `<mark>`, styled with the same
 `--accent-purple-100`/`-700` pair `ClipActionsOverlay.tsx`'s own clip-name
-labels already use, not a new color. **Verified live**: uploaded real speech
+labels already use, not a new color. `useTranscriptIndex.ts` is **per-clip
+memoized** via a module-level `clipCache` (added post-Phase-5 — the original
+version rescanned every clip's words on any single unrelated transcript
+update, since `transcriptStore`'s record is a new object reference on each
+one; same fix shape as `dehydrate()`'s own per-track cache below. Module-
+level, not `useRef` — this repo's `eslint-plugin-react-hooks` "refs" rule
+rejects reading `ref.current` during render even inside `useMemo`, same rule
+the Phase 1 notes above already document hitting once). **Verified live**: uploaded real speech
 ("Welcome to the Elephant Sanctuary Podcast…"), searched "elephant" — 2
 correctly-matched results, selecting one flipped the toolbar's Duplicate
 button from disabled to enabled (selection confirmed) and moved

@@ -121,7 +121,7 @@ trim/split/undo.
 
 **New dependency**: `mediabunny` — added to `editor-pro/package.json`.
 
-## Phase 1 — Data model + IndexedDB schema
+## Phase 1 — Data model + IndexedDB schema (DONE, verified live)
 
 New types in `src/utils/types.ts`:
 
@@ -168,7 +168,7 @@ completely independent of `commit()` — it must stay below/beside
 `TimelineStage`, same relocation fix already applied there for exactly this
 reason.
 
-## Phase 2 — Compression pipeline (upload + TTS paths)
+## Phase 2 — Compression pipeline (upload + TTS paths) (DONE, verified live)
 
 New pure module `src/utils/audioCompression.ts`:
 - `splitBufferIntoChunks(buffer, chunkDurationSeconds)` — pure sample math.
@@ -193,7 +193,7 @@ commit flow:
   is the "background" half of the requirement; the user can start editing
   immediately.
 
-## Phase 3 — Server route + background transcription
+## Phase 3 — Server route + background transcription (DONE, verified live)
 
 New `src/app/api/transcribe/route.ts`, mirroring `api/tts/route.ts`'s shape:
 holds `OPENROUTER_API_KEY` server-side, accepts one chunk's compressed blob
@@ -211,8 +211,12 @@ Reads/writes `transcriptStore` via `getState()`/`setState()` outside React,
 same pattern `projectStore.ts` already uses for its own module-level
 `stopIfPlaying`:
 1. Write `{status: "transcribing", words: null}` immediately.
-2. Fire all chunk requests to `/api/transcribe` in parallel
-   (`Promise.allSettled`).
+2. Fire chunk requests to `/api/transcribe`, at most 3 in flight at once
+   (`utils/concurrency.ts`'s `settleWithConcurrencyLimit` — added after a
+   post-Phase-5 review found a long asset, e.g. 18 chunks for a 3-hour
+   podcast at the default 10-min chunk size, fired every chunk at OpenRouter
+   simultaneously, a real way to trigger rate limiting; generic, Node-unit
+   tested, same `Promise.allSettled`-shaped contract).
 3. Offset each fulfilled chunk's words by `chunk.startSample/sampleRate`,
    merge + sort.
 4. All succeeded → `"done"`. Some succeeded → `"done"` + `partialFailure` +
@@ -224,6 +228,17 @@ transcripts for every referenced `assetId` (mirrors `loadAssets`'s existing
 pattern). Any transcript still `"pending"`/`"transcribing"` at reload time
 (tab closed mid-flight) is re-kicked via `runTranscriptionPipeline` against
 the already-persisted compressed chunks — cheap, no re-decode/re-compress.
+
+**Multi-chunk merge, verified live**: the original Phase 0-3 verification
+pass never actually exercised >1 chunk (every test clip was short enough to
+produce exactly one). Closed in a post-Phase-5 review: temporarily lowered
+`CHUNK_DURATION_SECONDS` to 8s, uploaded a real ~12.6s speech clip with 3
+chapter-marker checkpoints spanning the chunk boundary. Confirmed exactly 2
+`/api/transcribe` requests, 36 words merged in correct chronological order,
+and — the key proof — the marker spoken *after* the 8s boundary landed at
+9.5s, not reset near 0, confirming the second chunk's offset was applied
+correctly. Reverted the constant afterward; a full rebuild confirmed
+unchanged default (600s) behavior.
 
 ## Phase 4 — Re-transcription for spliced assets (DONE, verified live)
 
@@ -256,32 +271,79 @@ silence-removal keeps on each side of a cut. Zero console/page errors.
 
 ## Phase 5 — Audio search (DONE, verified live)
 
-Shared foundation: `src/hooks/useTranscriptIndex.ts` — for every clip on
-every track, reads `transcriptStore`, filters words whose `[start,end)`
-overlaps `[offsetSamples/sampleRate, (offsetSamples+durationSamples)/sampleRate)`,
-maps each to a timeline sample position
-`clip.startSample + Math.round(word.start*sampleRate) - offsetSamples`.
-Memoized on `(tracks, transcriptStore snapshot)`.
+**As actually built** (refined from the sketch below per direct user UX
+spec): `src/utils/transcriptSearch.ts` (pure — `ClipWordIndex`,
+`SearchResult`, `searchClipWordIndex`; case-insensitive substring-per-word
+phrase matching, chronological result order, `seekTimelineStart` = match
+start minus a fixed 0.5s lead-in clamped to 0) + `src/hooks/
+useTranscriptIndex.ts` (the reactive wrapper — also returns `isTranscribing`,
+computed in the same pass) + `src/components/search/SearchButton.tsx`
+(self-contained trigger + portaled popover, modeled on `ui/MenuButton.tsx`'s
+positioning/dismiss mechanics).
 
-**Transcription must stay invisible to the searching user.** Before running a
-search, the hook checks every currently-relevant clip's transcript status;
-if any is `"pending"`/`"transcribing"`, the search UI shows a plain
-"Searching…" state (never mentions transcription) and waits for those to
-settle before computing results — a `"failed"` transcript is simply excluded
-from results (its clip's words never existed as far as search is concerned),
-not surfaced as an error.
+`useTranscriptIndex.ts` builds the index from `usePlaylistData().tracks`
+(hydrated `AudioClip[]`, not `ClipMeta`) plus `transcriptStore`: for every
+clip, resolve its `assetId` via `getAssetId(clip.audioBuffer)` (same
+buffer-reference binding `useRemoveSilence.ts` already uses — `AudioClip` has
+no `assetId` field directly), look up its transcript, and if `"done"`, run
+`wordsInWindow` (shared with the Phase 4 remap) over
+`[offsetSamples/sampleRate, (offsetSamples+durationSamples)/sampleRate)`,
+mapping each surviving word to a timeline position
+(`clip.startSample/sampleRate + word.start`). **Per-clip memoized** via a
+module-level `clipCache` (not `useMemo`'s dependency array alone, and not
+`useRef` — this repo's `eslint-plugin-react-hooks` "refs" rule rejects
+reading `ref.current` during render even inside `useMemo`, caught immediately
+by `eslint`; same fix shape as `assetRegistry.ts`'s own module-level cache)
+— added after a post-Phase-5 review found the original flat-rescan version
+recomputed `wordsInWindow` for *every* clip whenever *any* single asset's
+transcript changed, since `transcriptStore`'s `transcripts` record is a new
+object reference on each update. Same class of fix `dehydrate()`'s own
+per-track cache already made once (`CLAUDE.md`'s "Post-Phase-3 perf
+regression").
+
+**Transcription must stay invisible to the searching user.** If any
+currently-relevant clip's transcript is still `"pending"`/`"transcribing"`
+when the user submits a search, the popover shows a plain "Searching…" state
+(never mentions transcription) and waits for it to settle before computing
+results — a `"failed"` transcript is simply excluded from results, not
+surfaced as an error.
+
+**Search runs on Enter, not on every keystroke** — changed after user
+feedback that live-as-you-type felt noisy; `query` (live input) and
+`submittedQuery` (last one actually searched) are separate state, so editing
+the box after submitting doesn't blank the current results, only pressing
+Enter again does. `SearchButton.tsx` owns this state directly rather than
+lifting it to `TopBar.tsx` — it never unmounts (lives in `TopBar.tsx`, which
+survives every engine rebuild), so closing the popover only toggles
+visibility, satisfying "results persist until cleared" with no extra store.
 
 UI: a TopBar-anchored popover (not a modal — search is a quick, repeated
-action), portaled/positioned the way `ClipActionsMenu.tsx`/`MenuButton.tsx`
-already do, debounced case-insensitive substring match for v1 (index is
-already cheap; matching logic can be swapped later without touching it).
-Each result: clip name, matched word + surrounding context, mm:ss. Clicking a
-result sets `EditorShell.tsx`'s existing `selectedClip` state (threaded down
-as a new callback prop through `TopBar`), seeks playback (verify the exact
-`usePlaylistControls()` method name against the vendored `.d.ts` at
-implementation time — same discipline CLAUDE.md's "Track selection split
-across three hooks" section already establishes for this library), and
-scrolls the existing `scrollEl` into view.
+action), portaled/positioned the way `ui/MenuButton.tsx` already does. Each
+result: clip name, timestamp (standalone `formatTime` from
+`@waveform-playlist/ui-components`, `"hh:mm:ss"` — deliberately not
+`usePlaylistControls().formatTime`, which drives current-time/total-duration
+elsewhere at their own precision and would have been an app-wide format
+change), and the match in context (2 words each side where available,
+ellipses only when context was actually truncated at the cap — not shown for
+a match merely near a clip's edge, which would misleadingly imply cut-off
+content that doesn't exist). Matched text renders in a real `<mark>`, styled
+with the same `--accent-purple-100`/`-700` pair `ClipActionsOverlay.tsx`'s
+own clip-name labels already use. Clicking a result sets `EditorShell.tsx`'s
+existing `selectedClip` state (threaded down through `TopBar` as a new
+`onSelectClip` prop) and calls `usePlaylistControls().seekTo()`.
+
+**Verified live** against a real production build: uploaded real speech
+("Welcome to the Elephant Sanctuary Podcast…"), searched "elephant" — 2
+correctly-matched results, the top one showing clip name, `00:00:00.703`
+timestamp, and `"…to the Elephant Sanctuary Podcast,…"` with `Elephant`
+marked. Clicking it flipped the toolbar's `Duplicate` button from disabled to
+enabled (selection confirmed) and moved `current-time` to `00:00:00.203` —
+exactly `0.703 - 0.5`, confirming the lead-in math. Closing (Escape) and
+reopening the popover preserved the same query and results. Separately
+confirmed after the Enter-to-search change: typing "dolphin" and waiting
+600ms produced zero results and left the pre-search placeholder showing;
+pressing Enter then correctly returned 1 result with a clean `00:00:00`
+timestamp (no decimals). Zero console errors throughout every pass.
 
 ## Phase 6 — Filler-word removal
 

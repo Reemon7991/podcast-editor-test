@@ -9,11 +9,19 @@
 
 import { useTranscriptStore } from "../store/transcriptStore";
 import { saveTranscript } from "./persistence";
+import { settleWithConcurrencyLimit } from "./concurrency";
 import type { AssetTranscript, CompressedChunk, TranscriptWord } from "./types";
 
 interface TranscribeChunkResult {
   words: TranscriptWord[];
 }
+
+// A long asset can have dozens of chunks (a 3-hour podcast at the default
+// 10-min chunk size is 18) — firing every one of them at OpenRouter
+// simultaneously is a real way to trigger upstream rate limiting that a
+// bounded burst wouldn't. Picked conservatively; easy to tune if real usage
+// shows it's too cautious or too aggressive.
+const MAX_CONCURRENT_CHUNK_REQUESTS = 3;
 
 async function transcribeChunk(chunk: CompressedChunk, sampleRate: number): Promise<TranscribeChunkResult> {
   const form = new FormData();
@@ -60,7 +68,9 @@ export async function runTranscriptionPipeline(
 
   setTranscript({ assetId, status: "transcribing", words: null, updatedAt: Date.now() });
 
-  const settled = await Promise.allSettled(chunks.map((chunk) => transcribeChunk(chunk, sampleRate)));
+  const settled = await settleWithConcurrencyLimit(chunks, MAX_CONCURRENT_CHUNK_REQUESTS, (chunk) =>
+    transcribeChunk(chunk, sampleRate)
+  );
 
   const succeeded = settled.filter(
     (r): r is PromiseFulfilledResult<TranscribeChunkResult> => r.status === "fulfilled"
