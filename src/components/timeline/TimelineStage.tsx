@@ -89,6 +89,20 @@ export function TimelineStage({
       waveHeight={TRACK_WAVE_HEIGHT}
       mono
       timescale
+      // Deliberately NOT passing automaticScroll here. Tried it first: it's
+      // the library's own per-frame "keep playhead centered" mechanism
+      // (confirmed by reading its dist source — runs inside the animation
+      // loop play() starts, recentering scrollLeft on literally every frame
+      // while isAutomaticScroll is true). Reverted after direct user
+      // feedback: continuous recentering fights any attempt to manually
+      // scroll away during playback (a deliberate scroll gets reverted
+      // within a frame or two), which read as "I can't scroll while
+      // playing," not the "help me find the playhead again" behavior asked
+      // for. Replaced by hooks/usePlayheadPagingScroll.ts (wired in
+      // EditorShell.tsx): pages the view forward only when the playhead
+      // actually reaches the right edge, and otherwise never touches
+      // scrollLeft — manual scrolling during playback works exactly like it
+      // always has. See that hook's own doc comment for the full design.
       controls={{ show: true, width: 180 }}
       theme={waveformTheme}
       barWidth={WAVEFORM_BAR_WIDTH}

@@ -22,7 +22,9 @@ import { AddClipsDropZone } from "./AddClipsDropZone";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
 import { useRemoveSilence } from "../../hooks/useRemoveSilence";
+import { usePlayheadPagingScroll } from "../../hooks/usePlayheadPagingScroll";
 import { resolveClipAt } from "../../utils/clipGeometry";
+import { centerScrollOnTimeSeconds } from "../../utils/timelineScroll";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
 import { useDeleteClipShortcut } from "../../hooks/useDeleteClipShortcut";
@@ -275,6 +277,46 @@ export function EditorShell({
     }
   });
 
+  // Jumps the timeline to center on `seconds` — used by SearchButton.tsx's
+  // result click. usePlaylistControls().seekTo() alone only moves the
+  // playhead's own currentTime; nothing scrolls to reveal it — a plain seek
+  // while paused is a separate gap from playback's own follow-scroll (below)
+  // and this library has no built-in handling for it at all, confirmed by
+  // reading its dist source. See utils/timelineScroll.ts's own doc comment
+  // for the full trace.
+  //
+  // savedScrollLeftRef is updated here too, synchronously, right alongside
+  // the jump — not left to the container's own "scroll" event listener
+  // above, which only updates it *asynchronously*. Without this, the
+  // restore effect just above (which runs on every render, including the
+  // one setSelectedClip triggers right after this) could read a still-stale
+  // savedScrollLeftRef and immediately snap this jump back to wherever the
+  // timeline happened to be scrolled before it.
+  const handleScrollToTime = useCallback(
+    (seconds: number) => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      centerScrollOnTimeSeconds(container, seconds, sampleRate, samplesPerPixel);
+      savedScrollLeftRef.current = container.scrollLeft;
+    },
+    [scrollContainerRef, sampleRate, samplesPerPixel]
+  );
+
+  // Pages the timeline forward once the playhead reaches the right edge
+  // during playback, landing it back at the left — see
+  // hooks/usePlayheadPagingScroll.ts's own doc comment for why this exists
+  // instead of the library's own automaticScroll prop (continuous
+  // recentering, reverted after direct user feedback that it fought manual
+  // scrolling during playback). onPaged mirrors handleScrollToTime's own
+  // synchronous savedScrollLeftRef update, for the same reason.
+  usePlayheadPagingScroll({
+    scrollContainerRef,
+    isPlaying,
+    onPaged: (newScrollLeft) => {
+      savedScrollLeftRef.current = newScrollLeft;
+    },
+  });
+
   return (
     <div className="flex flex-col gap-3">
       {silenceSaveWarning && (
@@ -311,6 +353,7 @@ export function EditorShell({
           canRemoveSilenceSelected={canRemoveSilenceSelected}
           isRemovingSilence={isRemovingSilence}
           onSelectClip={setSelectedClip}
+          onScrollToTime={handleScrollToTime}
         />
       </div>
       <div className="relative overflow-hidden rounded-xl border border-[var(--border)]">

@@ -28,13 +28,23 @@ interface TopBarProps {
    *  threaded down the same way every other clip-mutation callback already
    *  is. See search/SearchButton.tsx. */
   onSelectClip: (clip: SelectedClip) => void;
+  /** Scrolls the timeline to center on a result's seek target —
+   *  EditorShell.tsx's own handleScrollToTime. seekTo() alone only moves the
+   *  playhead, not the scroll position; see search/SearchButton.tsx and
+   *  utils/timelineScroll.ts for why that gap exists and how this closes it. */
+  onScrollToTime: (seconds: number) => void;
 }
 
 /**
  * Top toolbar: project label + Undo/Redo (left) — Split/Duplicate/Remove
  * silence/Delete clip actions, disabled until a clip is selected (center) —
- * Upload/Export (right). Replaces the old single TransportControls bar's
- * upload/export responsibility; playback/zoom now live in BottomBar.tsx instead.
+ * Search/Upload/Export (right). Replaces the old single TransportControls
+ * bar's upload/export responsibility; playback/zoom now live in
+ * BottomBar.tsx instead. Search used to sit in the left group next to
+ * Undo/Redo as a small round icon button; moved here and restyled to match
+ * "+ Clip"/"Export" (see search/SearchButton.tsx) per direct UX feedback —
+ * it reads as one of "the things you do with the finished podcast," not an
+ * editing action, so it belongs with that group, not Undo/Redo.
  */
 export function TopBar({
   onAddFilesToTrack,
@@ -50,6 +60,7 @@ export function TopBar({
   canRemoveSilenceSelected,
   isRemovingSilence,
   onSelectClip,
+  onScrollToTime,
 }: TopBarProps) {
   const { currentTime } = usePlaybackAnimation();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -83,7 +94,6 @@ export function TopBar({
         <span className="text-sm font-semibold text-[var(--foreground)]">Podcast Editor</span>
         <div className="h-5 w-px bg-[var(--border)]" />
         <UndoRedoButtons />
-        <SearchButton onSelectClip={onSelectClip} />
       </div>
 
       <div className="flex flex-1 items-center justify-center">
@@ -99,6 +109,8 @@ export function TopBar({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <SearchButton onSelectClip={onSelectClip} onScrollToTime={onScrollToTime} />
+        <div className="h-5 w-px bg-[var(--border)]" />
         {exportError && <span className="text-xs text-red-600">{exportError}</span>}
         <MenuButton
           label=" Clip"

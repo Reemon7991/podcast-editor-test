@@ -7,7 +7,13 @@ import { formatTime } from "@waveform-playlist/ui-components";
 import { Button } from "../ui/Button";
 import { LoadingState } from "../ui/LoadingState";
 import { useTranscriptIndex } from "../../hooks/useTranscriptIndex";
-import { searchClipWordIndex, CONTEXT_WORD_COUNT, type SearchResult } from "../../utils/transcriptSearch";
+import {
+  searchClipWordIndex,
+  capSearchResults,
+  CONTEXT_WORD_COUNT,
+  MAX_SEARCH_RESULTS,
+  type SearchResult,
+} from "../../utils/transcriptSearch";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 
 interface SearchButtonProps {
@@ -15,9 +21,23 @@ interface SearchButtonProps {
    *  setSelectedClip, threaded down the same way onDuplicateClip/
    *  onDeleteClip already are. */
   onSelectClip: (clip: SelectedClip) => void;
+  /** Scrolls the timeline to center on a result's seek target —
+   *  EditorShell.tsx's own handleScrollToTime. seekTo() below only moves the
+   *  playhead itself; the library's own scroll-follow never runs from a
+   *  plain seek while paused (see utils/timelineScroll.ts's doc comment), so
+   *  without this a result far outside the current viewport would select and
+   *  seek correctly but stay invisible until the user scrolled manually. */
+  onScrollToTime: (seconds: number) => void;
 }
 
 const POPOVER_WIDTH = 380;
+// Matches the popover's own `max-h-[28rem]` className below — used as the
+// pre-mount fallback for updatePosition's vertical clamp, before
+// popoverRef.current exists to measure a real height from.
+const POPOVER_MAX_HEIGHT = 448;
+// How much breathing room the popover keeps from the viewport's own edges on
+// every side (previously only enforced left/right).
+const VIEWPORT_EDGE_INSET_PX = 1;
 // No decimals — a result's timestamp only needs to orient the user, not
 // pinpoint the millisecond. Deliberately NOT usePlaylistControls().formatTime
 // (which drives current-time/total-duration elsewhere at their own,
@@ -44,7 +64,7 @@ const RESULT_TIME_FORMAT = "hh:mm:ss" as const;
  * input after submitting doesn't blank the current results; only pressing
  * Enter again re-runs the search against the new text.
  */
-export function SearchButton({ onSelectClip }: SearchButtonProps) {
+export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
@@ -65,10 +85,17 @@ export function SearchButton({ onSelectClip }: SearchButtonProps) {
   // it just shows the same "Searching…" state until it settles.
   const isSearching = hasSubmittedQuery && isTranscribing;
 
-  const results = useMemo<SearchResult[]>(
-    () => (hasSubmittedQuery && !isTranscribing ? searchClipWordIndex(index, submittedQuery) : []),
+  // Capped to MAX_SEARCH_RESULTS — a common word can match hundreds of times
+  // across a real podcast; searchClipWordIndex itself still returns every
+  // match (its own contract, independently tested), capping is applied here
+  // by the caller. See utils/transcriptSearch.ts's capSearchResults doc
+  // comment.
+  const searchOutcome = useMemo(
+    () =>
+      hasSubmittedQuery && !isTranscribing ? capSearchResults(searchClipWordIndex(index, submittedQuery)) : null,
     [index, submittedQuery, hasSubmittedQuery, isTranscribing]
   );
+  const results: SearchResult[] = searchOutcome?.results ?? [];
 
   const handleInputKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -77,26 +104,58 @@ export function SearchButton({ onSelectClip }: SearchButtonProps) {
     }
   };
 
+  // Clamped on all four sides against the viewport, not just left/right —
+  // previously only horizontal clamping existed, so a popover opened near
+  // the bottom of the window (or a short window overall) could run its
+  // bottom edge straight off-screen. Mirrors MenuButton.tsx's own
+  // "flip above the trigger if there isn't room below" rule rather than
+  // just clipping in place, so the whole popover always stays reachable.
   const updatePosition = useCallback(() => {
     const button = buttonRef.current;
     if (!button) return;
     const rect = button.getBoundingClientRect();
     const vw = window.innerWidth;
-    const left = Math.max(8, Math.min(rect.right - POPOVER_WIDTH, vw - POPOVER_WIDTH - 8));
-    setPopoverPos({ top: rect.bottom + 8, left });
+    const vh = window.innerHeight;
+    const popoverHeight = popoverRef.current?.offsetHeight ?? POPOVER_MAX_HEIGHT;
+
+    const left = Math.max(
+      VIEWPORT_EDGE_INSET_PX,
+      Math.min(rect.right - POPOVER_WIDTH, vw - POPOVER_WIDTH - VIEWPORT_EDGE_INSET_PX)
+    );
+
+    let top = rect.bottom + 8;
+    if (top + popoverHeight > vh - VIEWPORT_EDGE_INSET_PX) {
+      top = Math.max(VIEWPORT_EDGE_INSET_PX, rect.top - popoverHeight - 8);
+    }
+    setPopoverPos({ top, left });
   }, []);
 
   useEffect(() => {
     if (!open) return;
     updatePosition();
+    // The popover's real height isn't known until it's actually mounted and
+    // painted — this re-measures once that's happened, same two-pass
+    // approach MenuButton.tsx's own updatePosition effect already uses.
+    const raf = requestAnimationFrame(updatePosition);
     inputRef.current?.focus();
     window.addEventListener("scroll", updatePosition, true);
     window.addEventListener("resize", updatePosition);
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("scroll", updatePosition, true);
       window.removeEventListener("resize", updatePosition);
     };
   }, [open, updatePosition]);
+
+  // The popover's own content height changes as a search settles (a short
+  // placeholder vs. a full, possibly-truncated result list) — re-clamp
+  // whenever that happens so a vertical flip (above/below the trigger)
+  // reflects the content actually on screen, not stale content from the
+  // moment the popover first opened.
+  useEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open, updatePosition, results.length, isSearching, searchOutcome?.truncated]);
 
   // Closes on outside click / Escape — does not clear query/results, same
   // "close ≠ clear" distinction this component's own doc comment above
@@ -123,20 +182,30 @@ export function SearchButton({ onSelectClip }: SearchButtonProps) {
   const handleSelectResult = (result: SearchResult) => {
     onSelectClip({ trackId: result.trackId, clipId: result.clipId });
     seekTo(result.seekTimelineStart);
+    onScrollToTime(result.seekTimelineStart);
   };
 
   return (
     <>
+      {/* variant="secondary" + a leading icon matches the "+ Clip"/"Export"
+       *  buttons it now sits beside in TopBar.tsx, rather than the small
+       *  circular icon-only style this used before — one visual family
+       *  across every top-bar action, not a lone round outlier. aria-label
+       *  wins over the visible "Search" text for the accessible name (per
+       *  the standard accname computation), so this keeps the fuller
+       *  "Search in the podcast" name existing e2e coverage already queries
+       *  by. */}
       <Button
         ref={buttonRef}
-        variant="icon"
+        variant="secondary"
+        icon={<SearchIcon />}
         title="Search in the podcast"
         aria-label="Search in the podcast"
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
-        <SearchIcon />
+        Search
       </Button>
       {open &&
         createPortal(
@@ -196,6 +265,17 @@ export function SearchButton({ onSelectClip }: SearchButtonProps) {
                 </ul>
               )}
             </div>
+            {/* A common word can match hundreds of times in a real podcast —
+             *  results are capped at MAX_SEARCH_RESULTS (see
+             *  utils/transcriptSearch.ts's capSearchResults); this discloses
+             *  the cap instead of silently truncating, and says how many
+             *  more exist so the user knows to narrow the query rather than
+             *  wondering if search is broken. */}
+            {hasSubmittedQuery && !isSearching && searchOutcome?.truncated && (
+              <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-center text-xs text-[var(--text-muted)]">
+                Showing top {MAX_SEARCH_RESULTS} of {searchOutcome.totalMatches} matches — refine your search.
+              </div>
+            )}
           </div>,
           document.body
         )}

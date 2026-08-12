@@ -85,3 +85,26 @@ export function searchClipWordIndex(index: ClipWordIndex[], query: string): Sear
   results.sort((a, b) => a.timelineStart - b.timelineStart);
   return results;
 }
+
+/** A common word ("the") can match hundreds of times across a real podcast —
+ *  rendering all of them is both a performance problem and a usability one
+ *  (hundreds of unranked, unstyled rows with no way to tell which one is
+ *  relevant). Kept separate from searchClipWordIndex rather than folded into
+ *  it: the search algorithm's own contract (every match, chronological
+ *  order) stays simple and independently testable; capping is a
+ *  presentation concern layered on top, applied by the caller. */
+export const MAX_SEARCH_RESULTS = 50;
+
+export interface CappedSearchResults {
+  /** At most MAX_SEARCH_RESULTS, same chronological order as the input. */
+  results: SearchResult[];
+  /** The true match count before capping. */
+  totalMatches: number;
+  truncated: boolean;
+}
+
+export function capSearchResults(results: SearchResult[]): CappedSearchResults {
+  const totalMatches = results.length;
+  const truncated = totalMatches > MAX_SEARCH_RESULTS;
+  return { results: truncated ? results.slice(0, MAX_SEARCH_RESULTS) : results, totalMatches, truncated };
+}
