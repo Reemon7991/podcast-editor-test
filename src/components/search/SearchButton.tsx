@@ -37,7 +37,7 @@ const POPOVER_WIDTH = 380;
 const POPOVER_MAX_HEIGHT = 448;
 // How much breathing room the popover keeps from the viewport's own edges on
 // every side (previously only enforced left/right).
-const VIEWPORT_EDGE_INSET_PX = 1;
+const VIEWPORT_EDGE_INSET_PX = 8;
 // No decimals — a result's timestamp only needs to orient the user, not
 // pinpoint the millisecond. Deliberately NOT usePlaylistControls().formatTime
 // (which drives current-time/total-duration elsewhere at their own,
