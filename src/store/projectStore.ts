@@ -37,6 +37,47 @@ export function registerStopIfPlaying(fn: () => void): void {
 }
 
 /**
+ * Live per-track mute/solo/volume/pan. The engine mutates these in place but
+ * only bumps `mixerVersion`, never `tracksVersion` — so onTracksChange never
+ * fires for them, and `present` never learns about a mixer click on its own.
+ */
+export interface TrackMixerState {
+  muted: boolean;
+  soloed: boolean;
+  volume: number;
+  pan: number;
+}
+
+/** Bridges live mixer state out of WaveformPlaylistProvider's context for
+ *  code that can't reach it directly (this store, PodcastEditor.tsx) — same
+ *  pattern as stopIfPlaying above. Registered from EditorShell.tsx. */
+let getLiveMixerState: () => Map<string, TrackMixerState> = () => new Map();
+
+export function registerLiveMixerState(fn: () => Map<string, TrackMixerState>): void {
+  getLiveMixerState = fn;
+}
+
+/**
+ * Merges live mixer state onto a TrackMeta[] snapshot by track id — without
+ * this, a structural commit or a persistence save silently keeps each
+ * track's creation-time muted/soloed/volume/pan instead of what's live.
+ * Preserves object identity when nothing changed, so it doesn't defeat
+ * hydrate()'s cache or the incremental-add fast path in the common case.
+ */
+export function withLiveMixerState(tracks: TrackMeta[]): TrackMeta[] {
+  const live = getLiveMixerState();
+  if (live.size === 0) return tracks;
+  return tracks.map((t) => {
+    const m = live.get(t.id);
+    if (!m) return t;
+    if (t.muted === m.muted && t.soloed === m.soloed && t.volume === m.volume && t.pan === m.pan) {
+      return t;
+    }
+    return { ...t, ...m };
+  });
+}
+
+/**
  * `undo`/`redo` clone every track object before restoring, deliberately
  * breaking reference equality. Reason: the library's incremental-add
  * fast-path only checks that old track objects still exist *somewhere* in
@@ -118,6 +159,12 @@ interface ProjectStoreState {
    * pre-trim clip — visually indistinguishable from "undo did nothing."
    */
   dragBaseline: TrackMeta[] | null;
+  /** "Please save" signal, bumped from EditorShell.tsx on a live mixer
+   *  change — mute/solo/volume/pan never touch `past`, so this is what
+   *  re-arms PodcastEditor.tsx's save timer for a session that ends on a
+   *  pure mixer toggle. Value itself is never read. */
+  mixerTouchVersion: number;
+  touchMixerState: () => void;
   /**
    * `update` is always applied to whatever `present` *actually is* at the
    * moment this runs (read from `set`'s own state parameter, never a value
@@ -177,6 +224,9 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
   future: [],
   lastEngineOutput: null,
   dragBaseline: null,
+  mixerTouchVersion: 0,
+
+  touchMixerState: () => set((state) => ({ mixerTouchVersion: state.mixerTouchVersion + 1 })),
 
   commit: (update, label) => {
     // Called before `set`, not inside its updater — flushSync (which
@@ -184,7 +234,9 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
     // called from inside another component's render/commit.
     stopIfPlaying();
     set((state) => {
-      const before = state.present;
+      // Catch up on any live mixer change before this edit's `after` builds
+      // from it (see withLiveMixerState's doc comment).
+      const before = withLiveMixerState(state.present);
       const after = update(before);
       return {
         present: after,
@@ -196,7 +248,10 @@ export const useProjectStore = create<ProjectStoreState>((set) => ({
 
   commitEngineOutput: (raw, dehydrated) =>
     set((state) => {
-      const before = state.dragBaseline ?? state.present;
+      // `dehydrated` already has live mixer state (from the engine's own
+      // _tracks). `before` doesn't yet if this is the first engine-driven
+      // mirror since a mixer change — catch it up so undo doesn't revert it.
+      const before = withLiveMixerState(state.dragBaseline ?? state.present);
       if (deepEqual(before, dehydrated)) {
         return { present: dehydrated, lastEngineOutput: { dehydrated, raw }, dragBaseline: null };
       }

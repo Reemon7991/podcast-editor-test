@@ -5,7 +5,7 @@ import { TimelineStage } from "./timeline/TimelineStage";
 import { useTimelineTracks } from "../hooks/useTimelineTracks";
 import { useClipActions } from "../hooks/useClipActions";
 import { useProjectHydration } from "../hooks/useProjectHydration";
-import { useProjectStore } from "../store/projectStore";
+import { useProjectStore, withLiveMixerState } from "../store/projectStore";
 import { saveProject } from "../utils/persistence";
 import { LoadingState } from "./ui/LoadingState";
 
@@ -49,25 +49,60 @@ export function PodcastEditor() {
   // very transition where it stops early-returning — writing the
   // just-loaded, unmodified project back to IndexedDB on every app load,
   // even one where the user never touched anything. Skips exactly that one
-  // post-hydration occurrence; any later real `past` change still saves
-  // normally.
+  // post-hydration occurrence; any later real `past`/mixer change still
+  // saves normally.
   const skipNextSaveRef = useRef(true);
+  // Ref, not state — can't mutate `.current` during render either way (see
+  // EditorShell.tsx's activeTrackIdRef).
+  const isProjectHydratingRef = useRef(isProjectHydrating);
   useEffect(() => {
-    if (isProjectHydrating) return;
+    isProjectHydratingRef.current = isProjectHydrating;
+  }, [isProjectHydrating]);
+
+  // Shared by both save triggers below. Reads isProjectHydrating from a ref
+  // so this stays stable (no resubscribing the imperative listener below).
+  const scheduleSave = useCallback(() => {
+    if (isProjectHydratingRef.current) return;
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
       return;
     }
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
-      saveProject(useProjectStore.getState().present).catch((err) => {
+      // Mixer edits don't touch `past` — merge live state in here too.
+      const present = withLiveMixerState(useProjectStore.getState().present);
+      saveProject(present).catch((err) => {
         console.error("[podcast-editor] Failed to save project to IndexedDB", err);
       });
     }, SAVE_DEBOUNCE_MS);
+  }, []);
+
+  useEffect(() => {
+    scheduleSave();
     return () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
-  }, [past, isProjectHydrating]);
+  }, [past, isProjectHydrating, scheduleSave]);
+
+  // Re-arms the save timer on a mixer-only change (mute/solo/volume/pan
+  // never touch `past`, see mixerTouchVersion's doc comment).
+  //
+  // Subscribed imperatively, NOT via the reactive `useProjectStore(s =>
+  // s.mixerTouchVersion)` hook — that made PodcastEditor re-render on every
+  // mixer tweak, which cascaded into TimelineStage.tsx (not memoized;
+  // hydrate() always returns a new array reference) and forced an
+  // unnecessary full engine rebuild on every click. Regressed
+  // e2e/hydration.spec.ts's "adding a track does not rebuild" — confirmed
+  // by reproducing it, not just reasoned about.
+  useEffect(() => {
+    let lastVersion = useProjectStore.getState().mixerTouchVersion;
+    return useProjectStore.subscribe((state) => {
+      if (state.mixerTouchVersion !== lastVersion) {
+        lastVersion = state.mixerTouchVersion;
+        scheduleSave();
+      }
+    });
+  }, [scheduleSave]);
 
   // A podcast needs at least one track — the close button is hidden
   // entirely once only one remains (see the conditional onRemoveTrack prop

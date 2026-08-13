@@ -23,7 +23,12 @@ import { resolveClipAt } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
 import { useProjectExport } from "../../hooks/useProjectExport";
-import { registerStopIfPlaying } from "../../store/projectStore";
+import {
+  registerStopIfPlaying,
+  registerLiveMixerState,
+  useProjectStore,
+  type TrackMixerState,
+} from "../../store/projectStore";
 
 interface EditorShellProps {
   /** Undefined hides every track's close button — see TimelineStageProps. */
@@ -47,6 +52,38 @@ export function EditorShell({
 }: EditorShellProps) {
   const { isReady, tracks, trackStates, timeScaleHeight, samplesPerPixel, sampleRate, playoutRef } =
     usePlaylistData();
+
+  // Bridges live mute/solo/volume/pan out to projectStore.ts. Keyed on
+  // `trackStates` only — it only gets a new reference on a real mixer edit
+  // or track add/remove, never a clip-level edit — so this skips rerunning
+  // on every trim-preview frame.
+  const touchMixerState = useProjectStore((s) => s.touchMixerState);
+  const isFirstMixerSyncRef = useRef(true);
+  useEffect(() => {
+    const live = new Map<string, TrackMixerState>();
+    tracks.forEach((track, index) => {
+      const state = trackStates[index];
+      if (state) {
+        live.set(track.id, {
+          muted: state.muted,
+          soloed: state.soloed,
+          volume: state.volume,
+          pan: state.pan,
+        });
+      }
+    });
+    registerLiveMixerState(() => live);
+
+    // Skip the first sync (initial load) — not a user change; touching
+    // would resave the project on every app open.
+    if (isFirstMixerSyncRef.current) {
+      isFirstMixerSyncRef.current = false;
+    } else {
+      touchMixerState();
+    }
+    // `tracks` omitted deliberately — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackStates, touchMixerState]);
   const { selectedTrackId } = usePlaylistState();
   const { scrollContainerRef, setSelectedTrackId, stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
