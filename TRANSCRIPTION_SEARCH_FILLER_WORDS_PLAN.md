@@ -58,10 +58,10 @@ trim/split/undo.
   synchronous quota on a multi-hour podcast's word list).
 - Filler-word removal: **per-clip**, triggered from the same "..." clip menu
   as "Remove silence" — consistent with the existing pattern, one clip's cuts
-  = one batch commit = one undo step. Detected occurrences are shown in a
-  **review modal** (word + context + timestamp, individually checked), not
-  auto-removed — word-dictionary matching has real false positives ("like" as
-  a verb) that RMS-based silence detection never had.
+  = one batch commit = one undo step. **Superseded by Phase 6's actual
+  design**: scope narrowed to unambiguous words only, so a per-occurrence
+  review modal isn't needed — a lightweight confirm-with-counts step replaces
+  it. Kept here for the ordering rationale only.
 - Search scope: only words whose timestamp falls inside some clip's
   currently-used `[offsetSamples, offsetSamples+durationSamples)` window —
   i.e. audio actually on the timeline, not trimmed-away source material.
@@ -345,45 +345,149 @@ confirmed after the Enter-to-search change: typing "dolphin" and waiting
 pressing Enter then correctly returned 1 result with a clean `00:00:00`
 timestamp (no decimals). Zero console errors throughout every pass.
 
-## Phase 6 — Filler-word removal
+## Phase 6 — Filler-word removal (IMPLEMENTED, blocked on transcription quality — see CLAUDE.md)
 
-Dictionary: new `src/utils/fillerWords.ts`, curated + hardcoded for v1 (same
-"not fetched at runtime" precedent as `cartesiaVoices.ts`). Multi-word
-fillers ("you know", "i mean") need sliding-window n-gram matching over
-consecutive `words[]` entries, since Whisper returns single tokens. High-
-confidence fillers ("um", "uh", "erm", "hmm") pre-checked by default in the
-review modal; ambiguous ones ("like", "so", "actually", "you know") start
-unchecked, requiring opt-in.
+Scope narrowed before any code was written, per direct user spec: no
+multi-word fillers ("you know", "i mean") and no ambiguous single words
+("like", "so", "actually") at all for v1 — only short, unambiguous
+interjections ("um", "uh", "erm", "ah" and close relatives). Every dictionary
+entry is unambiguous, so there's no per-occurrence false-positive risk —
+that's what makes the shipped UX a lightweight confirm-with-counts step
+instead of the checkbox review list this section originally sketched (see
+"UX" below).
 
-Per-clip "..." menu item ("Remove filler words", next to "Remove silence" in
-`ClipActionsOverlay.tsx`'s `buildActions`) is **disabled whenever that clip's
-asset transcript status isn't `"done"`** — no modal opens until there's
-something to review; this is the one place transcription state is allowed to
-surface, and only as a disabled control, never an explanation of why.
+**Bilingual, per-word script detection instead of a language setting**:
+`src/utils/fillerWords.ts`'s `isFillerWord(word)` checks Arabic-range
+characters against an Arabic dictionary and everything else against an
+English one — no language field, no project setting. Normalization strips
+punctuation, lowercases, collapses elongated repeats ("ummmm" → "umm"), and
+(Arabic only) strips diacritics and unifies alef variants — confirmed
+necessary live: a script's plain "اه" round-tripped through a real
+Cartesia → Whisper pass as "آه" instead. The Arabic dictionary is
+deliberately tighter than the English one (bare alef-mim, undiacritized, is
+also "mother" — same ambiguity class as "like", left out rather than
+guessed at).
 
-Mechanics: reuse `useTranscriptIndex` scoped to the target clip for
-detection. Extract the splice-application tail of `silenceDetection.ts`'s
-`spliceOutSilence` (everything from `concatenateAudioData` onward) into a
-shared `spliceKeepRanges(...)` helper — both features are mechanically
-"detect ranges to remove → invert to keepRanges → splice", only the detector
-differs. New `useFillerWordRemoval.ts` mirrors `useRemoveSilence.ts`'s full
-discipline point-for-point: single-flight guard, yield-before-CPU-bound-work,
-pre-commit re-check of live clip boundaries, toast outcome, full-editor
-blocking overlay, exactly one `commit()` call (label "Remove filler words")
-for the whole batch.
+**Two real, unfixed upstream gaps found and confirmed live while building
+this — both raised with the user, both deliberately deferred, not fixed as
+part of this feature:**
 
-New `src/components/filler-words/FillerWordReviewModal.tsx`, modeled on
-`GenerateSpeechModal.tsx`'s portaled-centered-modal shape, checkbox list
-instead of a form.
+1. OpenRouter's `openai/whisper-large-v3` transcription endpoint does not
+   reliably auto-detect language — Arabic audio with no `language` param
+   comes back as an English *translation*, not an Arabic transcript
+   (`response.language` even reports `"en"`). Adding `language: "ar"` fixes
+   it completely. No way to know which language to request without asking
+   the user; out of scope for this feature, tracked for a future pass
+   (needs a persisted per-project language setting).
+2. Whisper frequently **omits filler words from its own transcript
+   entirely** — trained toward a clean, readable transcript, it often just
+   drops "um"/"uh" rather than transcribing them. Confirmed on both
+   languages with real Cartesia-synthesized audio that clearly spoke them.
+   Tried extensively to work around this (every OpenRouter-exposed model
+   variant — `whisper-large-v3`, `whisper-1`, `whisper-large-v3-turbo` — and
+   every parameter that could plausibly help: `prompt`/`initial_prompt` with
+   verbatim-style instructions, `temperature`, `condition_on_previous_text`,
+   `suppress_tokens`, provider routing hints); **none changed the output at
+   all** — OpenRouter's endpoint appears to only honor `file`/`model`/
+   `response_format`/`timestamp_granularities`/`language`, silently
+   dropping everything else. Not fixable without switching to a different
+   transcription provider (a direct OpenAI key, Groq, Deepgram, …) — out of
+   scope here. This feature can only ever catch whichever filler-word
+   instances Whisper happens to keep.
 
-**Cross-feature coordination, new gap found while designing this**:
+**Mechanics, reused from silence removal, not duplicated**: extracted the
+splice-application tail of `silenceDetection.ts`'s `spliceOutSilence` into a
+new shared `src/utils/clipSplice.ts`'s `spliceKeepRanges(...)` (plus the
+`KeepRange` type) — both features are "detect ranges to remove → invert to
+keepRanges → splice", only the detector differs. Detection itself is **not**
+shared — RMS-threshold-run detection and transcript-word-match detection
+operate on different inputs with different merge semantics; forcing one
+generic detector would have added more branching than it saved. New
+`src/utils/fillerWordDetection.ts`'s `detectFillerWords(...)` scans a clip's
+transcript window (`wordsInWindow`, shared with search/remap), pads each
+match (0.05s), merges cuts within 0.15s of each other, and inverts into
+`keepRanges`. Only words *fully contained* in the clip's window are ever
+touched — one straddling the edge is left alone.
+
+Considered and *rejected*: a silence-removal-style "drop tiny kept slivers"
+fold pass. Silence removal's version is safe because a short kept segment
+between two silences is presumptively near-silent junk; here, a short kept
+segment between two filler-word cuts is real audio (could be a genuine short
+word like "no") — dropping it on length alone risks deleting real content,
+not junk. Left out. The one edge case this doesn't cover (a filler word
+starting/ending very close to the clip's own boundary, where there's no
+neighboring cut to merge with) is a real but low-severity, disclosed gap —
+could leave a very brief residual sliver at a clip's edge.
+
+New `src/hooks/useFillerWordRemoval.ts` mirrors `useRemoveSilence.ts` but
+splits into two steps: `detectForClip(trackId, clip)` — synchronous, cheap,
+reads only the already-finished transcript — populates a `pending` summary
+or shows a "nothing to do" toast; `confirmPending()` — only reachable after
+the UI's confirm step — does the actual splice/commit/toast, otherwise
+identical to silence removal's discipline (single-flight guard,
+yield-before-CPU-bound-work, pre-commit re-check of live clip boundaries,
+remap-not-retranscribe for the result's transcript, one `commit()` labeled
+"Remove filler words").
+
+**UX**: clicking "Remove filler words" (per-clip "..." menu, next to
+"Remove silence" — **disabled whenever that clip's asset transcript status
+isn't `"done"`**, the one place transcription state is allowed to surface,
+only as a disabled control) runs detection immediately; if matches exist, a
+small `FillerWordConfirmModal.tsx` shows a "um × 2, uh × 1" style summary and
+a "Remove 3 words"/Cancel choice. Confirming applies the splice (blocking
+overlay + outcome toast, same treatment as silence removal); canceling
+discards with zero changes. No matches skips the modal, shows "No filler
+words detected in this clip." directly. Also exposed as a top-bar icon
+button in `ClipActionsToolbar.tsx`/`TopBar.tsx`, mirroring "Remove silence"'s
+own toolbar button one-for-one.
+
+**Cross-feature coordination, real gap found while building this**:
 `useRemoveSilence.ts` and `useFillerWordRemoval.ts` are each independently
-app-wide single-flight (their own `isProcessingRef`), but nothing coordinates
-*between* them — silence removal on clip A and filler removal on clip B
-triggered together would stack two full-editor blocking overlays.
-`EditorShell.tsx` needs a combined `isBusyProcessingClip = isRemovingSilence
-|| isApplyingFillerRemoval` gating both menu items and rendering only one
-overlay.
+single-flight but didn't coordinate with each other — running both at once
+would have stacked two blocking overlays. Fixed: `EditorShell.tsx` computes
+`isBusyProcessingClip = isRemovingSilence || isRemovingFillerWords`, gating
+both menu items and both toolbar buttons.
+
+**A second gap, found in a self-review pass after the feature first shipped
+(worth a dedicated pass — every other feature in this file got one too)**:
+`useUndoRedoShortcut`/`useDeleteClipShortcut` listen on `window` directly, so
+the confirm modal's backdrop (which only blocks pointer events) didn't stop
+Ctrl+Z/Delete from firing while it was open — undoing or deleting the clip a
+still-open confirmation was about to act on. Not a data-corruption risk
+(`confirmPending`'s pre-commit re-check already catches the mismatch and
+discards with an error toast) but a needlessly confusing way to find that
+out. Fixed by folding `pending !== null` into `EditorShell.tsx`'s
+`editorBusy`. Regression-tested — the test caught a stale dev server serving
+pre-fix code on its first run, which is itself a small confirmation the test
+was actually exercising the real code path.
+
+**Files**: `src/utils/fillerWords.ts`, `src/utils/fillerWordDetection.ts`,
+`src/utils/clipSplice.ts` (shared with silence removal), `src/hooks/
+useFillerWordRemoval.ts`, `src/components/filler-words/
+FillerWordConfirmModal.tsx`, a new `RemoveFillerWordsIcon` in
+`ClipActionIcons.tsx` (speech bubble, three dots, struck through — visually
+checked at both 16px and 96px before settling on this shape; an earlier
+wavy-line version was too cluttered at actual menu-item size).
+
+**Verification**: `fillerWords.ts`/`fillerWordDetection.ts` got a Node-side
+unit pass first (same order-of-operations discipline `silenceDetection.ts`
+already established), promoted into `e2e/fillerWordLogic.spec.ts` (21
+tests). Full browser-flow coverage in `e2e/fillerWordRemoval.spec.ts` (11
+tests): the transcript-readiness gate, the confirm summary's exact counts,
+cancel, the no-match toast, undo, the overlay/aria-disabled re-enable, the
+toast auto-dismiss, the reload round trip, remap-not-retranscribe, and the
+Ctrl+Z regression above. All mock `/api/transcribe` at the browser level
+(same layer `transcription.spec.ts` uses), so these run deterministically
+without needing live OpenRouter/Cartesia access. Full suite (157 tests)
+passed against a fresh prod build. **Not verified**: a real, live
+TTS → upload → transcribe → remove-filler-words pass end-to-end in a
+browser — attempted, blocked by the session's Cartesia account running out
+of TTS credits partway through setup (unrelated to any app code); the user
+verified manually instead. The two upstream-gap findings above (mistranslation,
+filler-word omission) were each confirmed with real Cartesia → OpenRouter
+round trips before that account ran out, so the *transcription* side of this
+feature has been exercised against the real API even though the full UI flow
+with real (not mocked) speech hasn't.
 
 ## Explicitly disclosed risks / not silently resolved
 

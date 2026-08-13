@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "../ui/Button";
-import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon } from "./ClipActionIcons";
+import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon, RemoveFillerWordsIcon } from "./ClipActionIcons";
 
 export interface SelectedClip {
   trackId: string;
@@ -21,9 +21,24 @@ interface ClipActionsToolbarProps {
    *  scan (a MIDI clip — see ClipActionsOverlay.tsx's own "audio-only
    *  feature" note; not reachable via this app's UI today, kept for parity). */
   canRemoveSilence: boolean;
-  /** App-wide single-flight (useRemoveSilence.ts) — disables this button and
-   *  swaps its tooltip even when a *different* clip is the one processing. */
+  /** True only while silence removal specifically is running — swaps this
+   *  button's own label/tooltip. Both buttons' *disabled* state uses the
+   *  combined isBusyProcessingClip below instead, so the two features can
+   *  never run at once. */
   isRemovingSilence: boolean;
+  /** Opens the filler-word removal confirmation for the selected clip. */
+  onRemoveFillerWords: () => void;
+  /** False when no clip is selected, the clip has no audio (MIDI), or its
+   *  transcript hasn't finished yet — see ClipActionsOverlay.tsx's own
+   *  transcriptReady check, mirrored here. */
+  canRemoveFillerWords: boolean;
+  /** True only while filler-word removal specifically is running — swaps
+   *  this button's own label/tooltip. */
+  isRemovingFillerWords: boolean;
+  /** True while EITHER silence or filler-word removal is running on any
+   *  clip — disables BOTH buttons app-wide so their blocking overlays
+   *  (EditorShell.tsx) can never stack. */
+  isBusyProcessingClip: boolean;
 }
 
 /**
@@ -51,9 +66,14 @@ export function ClipActionsToolbar({
   onRemoveSilence,
   canRemoveSilence,
   isRemovingSilence,
+  onRemoveFillerWords,
+  canRemoveFillerWords,
+  isRemovingFillerWords,
+  isBusyProcessingClip,
 }: ClipActionsToolbarProps) {
   const disabled = !selectedClip;
   const removeSilenceTitle = isRemovingSilence ? "Removing silence…" : "Remove silence";
+  const removeFillerWordsTitle = isRemovingFillerWords ? "Removing filler words…" : "Remove filler words";
 
   return (
     <div className="flex items-center gap-1">
@@ -71,12 +91,21 @@ export function ClipActionsToolbar({
       </Button>
       <Button
         variant="icon"
-        disabled={!canRemoveSilence || isRemovingSilence}
+        disabled={!canRemoveSilence || isBusyProcessingClip}
         onClick={onRemoveSilence}
         title={removeSilenceTitle}
         aria-label={removeSilenceTitle}
       >
         <RemoveSilenceIcon />
+      </Button>
+      <Button
+        variant="icon"
+        disabled={!canRemoveFillerWords || isBusyProcessingClip}
+        onClick={onRemoveFillerWords}
+        title={removeFillerWordsTitle}
+        aria-label={removeFillerWordsTitle}
+      >
+        <RemoveFillerWordsIcon />
       </Button>
       <Button
         variant="icon"

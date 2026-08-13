@@ -1,7 +1,7 @@
 // Energy/RMS-based silence detection + splice. Pure, no React/DOM at module
 // scope. See SILENCE_REMOVAL_PLAN.md for the full design.
 
-import { concatenateAudioData, createAudioBuffer } from "@waveform-playlist/core";
+import { spliceKeepRanges, type ClipSpliceResult, type KeepRange } from "./clipSplice";
 
 export interface SilenceDetectionOptions {
   /** Analysis window length in seconds. Every step below operates in units
@@ -40,13 +40,9 @@ export const DEFAULT_SILENCE_DETECTION_OPTIONS: Required<SilenceDetectionOptions
   thresholdMultiplier: 3,
 };
 
-export interface KeepRange {
-  /** Sample offset relative to the analyzed channelData's own start (0 =
-   *  the clip's offsetSamples), not the timeline. */
-  startSample: number;
-  /** Exclusive end, same coordinate space as startSample. */
-  endSample: number;
-}
+// KeepRange re-exported for existing importers (transcriptRemap.ts) — its
+// canonical home is now clipSplice.ts, shared with filler-word removal.
+export type { KeepRange };
 
 function resolveOptions(options?: SilenceDetectionOptions): Required<SilenceDetectionOptions> {
   return { ...DEFAULT_SILENCE_DETECTION_OPTIONS, ...options };
@@ -196,23 +192,10 @@ export function detectKeepRanges(
   return mergeTinyKeptRanges(keepRanges, minKeptSamples);
 }
 
-export type SpliceOutSilenceResult =
-  | { type: "unchanged" }
-  | { type: "all-silence" }
-  | {
-      type: "trimmed";
-      buffer: AudioBuffer;
-      leadingEdgeKept: boolean;
-      trailingEdgeKept: boolean;
-      /** The exact kept ranges used for the splice (sample offsets relative
-       *  to the clip's own start, i.e. 0 = offsetSamples — see KeepRange's
-       *  own doc comment), in the same ascending/non-overlapping order the
-       *  splice itself consumed them in. Added for
-       *  TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 4 — lets a caller
-       *  remap the source clip's transcript through the same cuts
-       *  (utils/transcriptRemap.ts) without re-deriving them. */
-      keepRanges: KeepRange[];
-    };
+// Same shape as clipSplice.ts's ClipSpliceResult, just with silence
+// removal's own, more descriptive "all-silence" label in place of the
+// generic "removed-all" — see spliceOutSilence's own final line below.
+export type SpliceOutSilenceResult = Exclude<ClipSpliceResult, { type: "removed-all" }> | { type: "all-silence" };
 
 /**
  * Detects silence in `sourceBuffer`'s [offsetSamples, offsetSamples +
@@ -234,26 +217,9 @@ export function spliceOutSilence(
   }
 
   const keepRanges = detectKeepRanges(channelData, sourceBuffer.sampleRate, options);
-
-  if (keepRanges.length === 1 && keepRanges[0].startSample === 0 && keepRanges[0].endSample === durationSamples) {
-    return { type: "unchanged" };
-  }
-  if (keepRanges.length === 0) {
-    return { type: "all-silence" };
-  }
-
-  const splicedChannels = channelData.map((channel) =>
-    concatenateAudioData(keepRanges.map((range) => channel.slice(range.startSample, range.endSample)))
-  );
-  // channelCount passed explicitly — createAudioBuffer defaults it to 1
-  // (mono) when omitted, which would silently drop every channel past 0.
-  const buffer = createAudioBuffer(audioContext, splicedChannels, sourceBuffer.sampleRate, channelCount);
-
-  return {
-    type: "trimmed",
-    buffer,
-    leadingEdgeKept: keepRanges[0].startSample === 0,
-    trailingEdgeKept: keepRanges[keepRanges.length - 1].endSample === durationSamples,
-    keepRanges,
-  };
+  const result = spliceKeepRanges(audioContext, sourceBuffer, offsetSamples, durationSamples, keepRanges);
+  // "all-silence" is this function's own, more descriptive name for
+  // clipSplice.ts's generic "removed-all" outcome — kept as a distinct
+  // string here rather than renaming useRemoveSilence.ts's existing check.
+  return result.type === "removed-all" ? { type: "all-silence" } : result;
 }

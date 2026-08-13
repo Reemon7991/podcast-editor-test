@@ -19,13 +19,17 @@ import { BottomBar } from "../transport/BottomBar";
 import { ClipDragLayer } from "./ClipDragLayer";
 import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { AddClipsDropZone } from "./AddClipsDropZone";
+import { FillerWordConfirmModal } from "../filler-words/FillerWordConfirmModal";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
 import { useRemoveSilence } from "../../hooks/useRemoveSilence";
+import { useFillerWordRemoval } from "../../hooks/useFillerWordRemoval";
 import { usePlayheadPagingScroll } from "../../hooks/usePlayheadPagingScroll";
 import { resolveClipAt } from "../../utils/clipGeometry";
 import { centerScrollOnTimeSeconds } from "../../utils/timelineScroll";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
+import { getAssetId } from "../../utils/assetRegistry";
+import { useTranscriptStore } from "../../store/transcriptStore";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
 import { useDeleteClipShortcut } from "../../hooks/useDeleteClipShortcut";
 import { useProjectExport } from "../../hooks/useProjectExport";
@@ -82,8 +86,32 @@ export function EditorShell({
     dismissSaveWarning: dismissSilenceSaveWarning,
   } = useRemoveSilence();
   const isRemovingSilence = processingClipId !== null;
+  // Same relocation reasoning as useRemoveSilence() above (its own doc
+  // comment on why it lives here, not lifted to PodcastEditor.tsx) applies
+  // identically here — detectForClip()/pending/processingClipId all change
+  // independently of any real commit(), so this must stay below
+  // TimelineStage too.
+  const {
+    detectForClip: detectFillerWordsForClip,
+    pending: pendingFillerWordRemoval,
+    cancelPending: cancelFillerWordRemoval,
+    confirmPending: confirmFillerWordRemoval,
+    processingClipId: fillerWordsProcessingClipId,
+    toast: fillerWordsToast,
+    dismissToast: dismissFillerWordsToast,
+    saveWarning: fillerWordsSaveWarning,
+    dismissSaveWarning: dismissFillerWordsSaveWarning,
+  } = useFillerWordRemoval();
+  const isRemovingFillerWords = fillerWordsProcessingClipId !== null;
+  // Neither useRemoveSilence.ts nor useFillerWordRemoval.ts coordinates with
+  // the other on its own (each is only single-flight against itself) — this
+  // is what stops them from running at once and stacking two blocking
+  // overlays. Gates both menu items (ClipActionsOverlay.tsx/
+  // ClipActionsToolbar.tsx) and the one combined overlay below.
+  const isBusyProcessingClip = isRemovingSilence || isRemovingFillerWords;
   const { isReady, tracks, trackStates, timeScaleHeight, samplesPerPixel, sampleRate, playoutRef } =
     usePlaylistData();
+  const transcripts = useTranscriptStore((s) => s.transcripts);
   const { selectedTrackId } = usePlaylistState();
   const { scrollContainerRef, setSelectedTrackId, stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
@@ -159,6 +187,22 @@ export function EditorShell({
     }
   };
 
+  // Same transcriptReady gate ClipActionsOverlay.tsx's own per-clip menu
+  // item applies, resolved here for the top-bar toolbar's selected clip —
+  // see that component's buildActions for the full reasoning.
+  const selectedClipAssetId = selectedClipForToolbar?.audioBuffer
+    ? getAssetId(selectedClipForToolbar.audioBuffer)
+    : undefined;
+  const selectedClipTranscriptReady =
+    !!selectedClipAssetId && transcripts[selectedClipAssetId]?.status === "done";
+  const canRemoveFillerWordsSelected =
+    !!selectedClipForToolbar && !selectedClipForToolbar.midiNotes && selectedClipTranscriptReady;
+  const handleRemoveFillerWordsSelected = () => {
+    if (selectedTrackForToolbar && selectedClipForToolbar) {
+      detectFillerWordsForClip(selectedTrackForToolbar.id, selectedClipForToolbar);
+    }
+  };
+
   // Registers this provider's actual stop()/isPlaying with the project store
   // (see projectStore.ts's own doc comment on stopIfPlaying/
   // registerStopIfPlaying) so `commit`/`undo`/`redo` — called from outside
@@ -185,9 +229,12 @@ export function EditorShell({
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
-  // same isReady/isExporting/isRemovingSilence/isImportingClip signals
+  // same isReady/isExporting/isBusyProcessingClip/isImportingClip signals
   // already gating TopBar/BottomBar below.
-  const editorBusy = !isReady || isExporting || isRemovingSilence || isImportingClip;
+  // pendingFillerWordRemoval included too: undo/delete listen on `window`,
+  // so the confirm modal's backdrop (pointer-only) can't block them.
+  const editorBusy =
+    !isReady || isExporting || isBusyProcessingClip || isImportingClip || pendingFillerWordRemoval !== null;
   useUndoRedoShortcut(!editorBusy);
   // Delete/Backspace deletes the selected clip — see useDeleteClipShortcut.ts.
   useDeleteClipShortcut(!editorBusy, selectedClip, onDeleteClip);
@@ -311,7 +358,6 @@ export function EditorShell({
   // synchronous savedScrollLeftRef update, for the same reason.
   usePlayheadPagingScroll({
     scrollContainerRef,
-    isPlaying,
     onPaged: (newScrollLeft) => {
       savedScrollLeftRef.current = newScrollLeft;
     },
@@ -323,6 +369,19 @@ export function EditorShell({
         <WarningBanner message={silenceSaveWarning} onDismiss={dismissSilenceSaveWarning} />
       )}
       {silenceToast && <Toast message={silenceToast} onDismiss={dismissSilenceToast} />}
+      {fillerWordsSaveWarning && (
+        <WarningBanner message={fillerWordsSaveWarning} onDismiss={dismissFillerWordsSaveWarning} />
+      )}
+      {fillerWordsToast && <Toast message={fillerWordsToast} onDismiss={dismissFillerWordsToast} />}
+      {pendingFillerWordRemoval && (
+        <FillerWordConfirmModal
+          clipName={pendingFillerWordRemoval.clip.name ?? "this clip"}
+          summary={pendingFillerWordRemoval.summary}
+          totalCount={pendingFillerWordRemoval.totalCount}
+          onConfirm={confirmFillerWordRemoval}
+          onCancel={cancelFillerWordRemoval}
+        />
+      )}
       {/* Cross-track clip moves go through onTracksChange directly (see
        *  ClipDragLayer.tsx), which the provider can only apply via a full
        *  engine rebuild — dispose + rebuild the Tone.js engine for every
@@ -332,7 +391,7 @@ export function EditorShell({
        *  post-rebuild one) that throws "TonePlayout not initialized" if Play
        *  is pressed mid-rebuild. isReady is the provider's own rebuild-done
        *  signal — gating the transport bar on it closes that window. Also
-       *  gated on isRemovingSilence/isImportingClip, same treatment as
+       *  gated on isBusyProcessingClip/isImportingClip, same treatment as
        *  isExporting — see the editing overlays below. */}
       <div
         data-testid="top-bar"
@@ -352,6 +411,10 @@ export function EditorShell({
           onRemoveSilenceSelected={handleRemoveSilenceSelected}
           canRemoveSilenceSelected={canRemoveSilenceSelected}
           isRemovingSilence={isRemovingSilence}
+          onRemoveFillerWordsSelected={handleRemoveFillerWordsSelected}
+          canRemoveFillerWordsSelected={canRemoveFillerWordsSelected}
+          isRemovingFillerWords={isRemovingFillerWords}
+          isBusyProcessingClip={isBusyProcessingClip}
           onSelectClip={setSelectedClip}
           onScrollToTime={handleScrollToTime}
         />
@@ -370,6 +433,9 @@ export function EditorShell({
               onDeleteClip={onDeleteClip}
               onRemoveSilence={removeSilence}
               processingClipId={processingClipId}
+              onRemoveFillerWords={detectFillerWordsForClip}
+              fillerWordsProcessingClipId={fillerWordsProcessingClipId}
+              isBusyProcessingClip={isBusyProcessingClip}
               playPendingRef={playPendingRef}
               scrollEl={scrollEl}
               scissors={scissors}
@@ -409,6 +475,21 @@ export function EditorShell({
             className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
           >
             <LoadingState message="Removing silence…" />
+          </div>
+        )}
+        {/* Same full-editor blocking treatment as silence removal above —
+         *  isBusyProcessingClip (this component's own combined flag)
+         *  guarantees the two can never be true at once, so only one of
+         *  these two overlay blocks is ever actually on screen. Kept as a
+         *  separate block (not merged into the one above) rather than
+         *  generalizing its message, so silence removal's existing
+         *  data-testid/committed e2e coverage stays untouched. */}
+        {isRemovingFillerWords && (
+          <div
+            data-testid="filler-word-removal-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Removing filler words…" />
           </div>
         )}
         {/* Blocks editing while an uploaded/dropped clip is still decoding —

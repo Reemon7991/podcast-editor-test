@@ -12,12 +12,14 @@ import {
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
 import { FadeHandles } from "./FadeHandles";
 import { TrimHandleBars } from "./TrimHandleBars";
-import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon } from "./ClipActionIcons";
+import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon, RemoveFillerWordsIcon } from "./ClipActionIcons";
 import type { SelectedClip } from "./ClipActionsToolbar";
 import type { UseScissorsSplitResult } from "../../hooks/useScissorsSplit";
 import { useFadeDragHandlers } from "../../hooks/useFadeDragHandlers";
 import { resolveClipAt, clipPixelWidth } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX, TRACK_WAVE_HEIGHT } from "../../utils/trackLayout";
+import { getAssetId } from "../../utils/assetRegistry";
+import { useTranscriptStore } from "../../store/transcriptStore";
 
 // The header row reserved by <Waveform showClipHeaders> — derived rather
 // than a third hardcoded "22" (trackLayout.ts's own copy is intentionally
@@ -95,6 +97,16 @@ interface ClipActionsOverlayProps {
    *  app-wide single-flight, not per-clip — see useRemoveSilence.ts), and
    *  drives the busy label on the one matching clip. */
   processingClipId: string | null;
+  /** Opens the filler-word removal confirmation for this clip — see
+   *  useFillerWordRemoval.ts's detectForClip. */
+  onRemoveFillerWords: (trackId: string, clip: AudioClip) => void;
+  /** Same contract as processingClipId, for filler-word removal's own
+   *  app-wide single-flight. */
+  fillerWordsProcessingClipId: string | null;
+  /** True while EITHER silence or filler-word removal is running on any
+   *  clip — disables BOTH menu items app-wide so the two blocking overlays
+   *  (EditorShell.tsx) can never stack. */
+  isBusyProcessingClip: boolean;
   /** Threaded through to useFadeDragHandlers — see its own doc comment and
    *  transport/PlayButton.tsx / timeline/ClipDragLayer.tsx for the play()/
    *  rebuild race this guards against. A fade-drag commit reaches
@@ -168,6 +180,9 @@ export function ClipActionsOverlay({
   onDeleteClip,
   onRemoveSilence,
   processingClipId,
+  onRemoveFillerWords,
+  fillerWordsProcessingClipId,
+  isBusyProcessingClip,
   playPendingRef,
   scrollEl,
   scissors,
@@ -176,6 +191,12 @@ export function ClipActionsOverlay({
   const { tracks, samplesPerPixel, timeScaleHeight, isDraggingRef, onTracksChange } = usePlaylistData();
   const { stop } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
+  // Only needed to gate "Remove filler words" until a clip's asset
+  // transcript is "done" — see buildActions below. Subscribing here (not a
+  // one-off getState() read inside buildActions) means the menu item flips
+  // from disabled to enabled on its own once transcription finishes, same
+  // as every other reactive bit of this component.
+  const transcripts = useTranscriptStore((s) => s.transcripts);
 
   const [hovered, setHovered] = useState<ClipRef | null>(null);
   const [menuOpenFor, setMenuOpenFor] = useState<ClipRef | null>(null);
@@ -404,11 +425,32 @@ export function ClipActionsOverlay({
         // plain edit actions above — this operates on the whole clip's audio
         // rather than just moving/removing it outright.
         separatorBefore: true,
-        // App-wide single-flight (useRemoveSilence.ts), not per-clip — every
-        // clip's item disables while any one is running, not just this one.
-        disabled: processingClipId !== null,
+        // Disabled while EITHER silence or filler-word removal is running
+        // anywhere (isBusyProcessingClip) — not just this specific
+        // operation — so the two features' blocking overlays can never
+        // stack (EditorShell.tsx renders only one at a time).
+        disabled: isBusyProcessingClip,
         onSelect: () => {
           onRemoveSilence(track.id, clip);
+          closeAndReset();
+        },
+      });
+
+      // Disabled until this clip's own asset transcript has finished (not
+      // just "exists") — no confirmation can open until there's something
+      // to detect. Per TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 6:
+      // this is the one place transcription state is allowed to surface,
+      // and only as a disabled control, never an explanation of why (search
+      // stays fully silent about it elsewhere).
+      const assetId = clip.audioBuffer ? getAssetId(clip.audioBuffer) : undefined;
+      const transcriptReady = !!assetId && transcripts[assetId]?.status === "done";
+      actions.push({
+        id: "remove-filler-words",
+        label: fillerWordsProcessingClipId === clip.id ? "Removing filler words…" : "Remove filler words",
+        icon: <RemoveFillerWordsIcon />,
+        disabled: isBusyProcessingClip || !transcriptReady,
+        onSelect: () => {
+          onRemoveFillerWords(track.id, clip);
           closeAndReset();
         },
       });

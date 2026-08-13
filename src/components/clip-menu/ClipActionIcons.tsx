@@ -94,3 +94,35 @@ export function RemoveSilenceIcon() {
     </svg>
   );
 }
+
+/** A speech bubble with its spoken content struck through — reads as "cut
+ *  the words that were said", distinct from RemoveSilenceIcon's flattened
+ *  waveform (that targets the gaps *between* words; this targets specific
+ *  words themselves). Three dots stand in for "um…"-style hesitation rather
+ *  than legible text (matching this icon set's existing economy — no literal
+ *  letterforms anywhere else in it either); rendered filled, not stroked,
+ *  so they stay a crisp, single-color mark at 16px instead of a stroked
+ *  wavy line's fuzzier, three-stroke-elements-competing look at that size
+ *  (visually checked at both 16px and 96px before settling on this shape —
+ *  an earlier wavy-line version read as cluttered at actual menu-item size). */
+export function RemoveFillerWordsIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 4v-4H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z" />
+      <circle cx="8.5" cy="10.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="10.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15.5" cy="10.5" r="1" fill="currentColor" stroke="none" />
+      <line x1="4" y1="17" x2="20" y2="4" />
+    </svg>
+  );
+}

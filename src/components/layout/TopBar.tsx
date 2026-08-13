@@ -24,6 +24,10 @@ interface TopBarProps {
   onRemoveSilenceSelected: () => void;
   canRemoveSilenceSelected: boolean;
   isRemovingSilence: boolean;
+  onRemoveFillerWordsSelected: () => void;
+  canRemoveFillerWordsSelected: boolean;
+  isRemovingFillerWords: boolean;
+  isBusyProcessingClip: boolean;
   /** Selects a clip found via search — EditorShell.tsx's own setSelectedClip,
    *  threaded down the same way every other clip-mutation callback already
    *  is. See search/SearchButton.tsx. */
@@ -59,6 +63,10 @@ export function TopBar({
   onRemoveSilenceSelected,
   canRemoveSilenceSelected,
   isRemovingSilence,
+  onRemoveFillerWordsSelected,
+  canRemoveFillerWordsSelected,
+  isRemovingFillerWords,
+  isBusyProcessingClip,
   onSelectClip,
   onScrollToTime,
 }: TopBarProps) {
@@ -105,6 +113,10 @@ export function TopBar({
           onRemoveSilence={onRemoveSilenceSelected}
           canRemoveSilence={canRemoveSilenceSelected}
           isRemovingSilence={isRemovingSilence}
+          onRemoveFillerWords={onRemoveFillerWordsSelected}
+          canRemoveFillerWords={canRemoveFillerWordsSelected}
+          isRemovingFillerWords={isRemovingFillerWords}
+          isBusyProcessingClip={isBusyProcessingClip}
         />
       </div>
 

@@ -16,13 +16,13 @@ text-to-speech, and silence removal are all done (see the persistence/
 undo-redo layer section, "Fade in/out", "Export", "Text-to-Speech (Cartesia)",
 and "Silence removal" below), each with a committed test suite. On top of
 those, a **word-level transcription pipeline (Whisper via OpenRouter) and
-audio search are now also done** (see "Transcription pipeline + Audio search"
-below) — verified live against a real production build at every phase, but
-**not yet covered by a committed Playwright suite** (ad-hoc scratchpad
-verification only, same discipline the rest of this file used before the
-persistence/undo-redo layer's suite existed — see "Verification approach").
-**Filler-word removal — the other feature this transcription pipeline was
-built for — has not been started yet.** Every non-obvious decision below
+audio search are now done** (see "Transcription pipeline + Audio search"
+below) — verified live against a real production build at every phase and
+backed by committed Playwright coverage (57 tests). **Filler-word removal is
+implemented and tested but NOT fully done** — see "Filler-word removal
+(implemented, blocked on transcription quality)" below: two real, upstream
+Whisper-via-OpenRouter gaps (mistranslation, filler-word omission) cap how
+useful it actually is until a transcription-provider fix lands. Every non-obvious decision below
 exists because of something concretely discovered while building this, not
 speculation — treat this file as the fastest way to avoid re-deriving that
 work in a future session.
@@ -102,13 +102,15 @@ those two; the AI features are the most speculative and probably last).
    (Whisper via OpenRouter, backend-owned like TTS) and audio search built on
    top of it: **done** — see "Transcription pipeline + Audio search" below;
    `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md` is the original design doc for
-   both this and the still-open item below, same "kept corrected" discipline.
-   **Filler-word removal is the one AI feature still not started** — the
-   transcription pipeline it depends on is done and its own plan doc already
-   spells out the intended design (per-clip menu item, disabled until that
-   clip's transcript is ready, a review-then-apply modal rather than
-   silence-removal's blind auto-apply — deliberately, since word-dictionary
-   matching has real false positives RMS-based silence detection never had).
+   both this and the item below, same "kept corrected" discipline.
+   Filler-word removal: **implemented and tested, but NOT fully done** — see
+   "Filler-word removal (implemented, blocked on transcription quality)"
+   below; scope ended up narrower than this plan's original sketch
+   (unambiguous words only, so a confirm-with-counts step replaces the
+   originally-planned per-occurrence review modal), but the feature's real-
+   world usefulness is capped by two unfixed Whisper-via-OpenRouter gaps
+   (mistranslation, filler-word omission) — needs a transcription-provider
+   fix (an `OPENAI_API_KEY` is planned) before this can actually be called done.
    Noise/humming removal remain fully open, no design work done.
 
 ## Architecture
@@ -1162,8 +1164,8 @@ generated clip, feeding a "Search in the podcast" popover. Full design:
 `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md`, kept corrected against what
 actually shipped, same discipline as `SILENCE_REMOVAL_PLAN.md`/
 `TTS_CARTESIA_PLAN.md`. Filler-word removal — the other feature this
-pipeline was built for — is not started; see that plan doc's Phase 6 for the
-intended design.
+pipeline was built for — is implemented but not fully done; see "Filler-word
+removal (implemented, blocked on transcription quality)" below.
 
 **The one finding that shapes the whole design**: `ClipMeta`/`AudioClip`
 already carries everything needed to make a transcript survive move/trim/
@@ -1311,18 +1313,143 @@ produced zero results (confirming the old debounce-driven live search is
 really gone); closing and reopening the popover preserved the same query and
 results.
 
-**Not built / disclosed gaps**: no committed Playwright suite for any of
-this yet (every phase verified live via ad-hoc scratchpad Playwright
-scripts against real production builds and, where relevant, real Whisper/
-Cartesia calls — see "Verification approach" below); a `"failed"` transcript
-(every chunk failed) has no retry affordance beyond the reload-time re-kick;
-the filler-word dictionary/UI itself doesn't exist yet (see the "Planned
-features" bullet above and the plan doc's Phase 6); a stale `next dev`/`next
-start` process left running on port 3000 from an earlier session silently
-absorbed test traffic more than once while verifying this feature — same
-"confirm the shared dev server is actually alive before suspecting the code"
-gotcha this file's own "Verification approach" section already documents,
-worth remembering specifically because it recurred here.
+**Not built / disclosed gaps**: a `"failed"` transcript (every chunk failed)
+has no retry affordance beyond the reload-time re-kick; a stale `next dev`/
+`next start` process left running on port 3000 from an earlier session
+silently absorbed test traffic more than once while verifying this feature —
+same "confirm the shared dev server is actually alive before suspecting the
+code" gotcha this file's own "Verification approach" section already
+documents, worth remembering specifically because it recurred here (and
+recurred *again*, in a stale-not-dead variant, while building filler-word
+removal — see that section below).
+
+**Correction, since superseded**: this section used to say "no committed
+Playwright suite for any of this yet." That's no longer true — search and
+transcription now have committed coverage (`e2e/search.spec.ts`,
+`e2e/transcription.spec.ts`, `e2e/transcriptionLogic.spec.ts`,
+`e2e/transcriptionPipeline.spec.ts`, `e2e/transcribeRoute.spec.ts`, 57 tests
+total), added in a later pass than the rest of this section's prose.
+
+## Filler-word removal (implemented, blocked on transcription quality)
+
+Per-clip "Remove filler words" — detects "um"/"uh"/"erm"/"ah"-style words
+from the clip's own transcript, shows a count summary, splices them out on
+confirm. Full design: `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md`'s Phase 6,
+kept corrected against what shipped.
+
+**Not marked "(done)" on purpose.** The app-side implementation is finished,
+reviewed, and tested (157 tests passing) — but its actual usefulness is
+capped by two unfixed Whisper-via-OpenRouter gaps below (mistranslation,
+filler-word omission), neither fixable from this app's own code. A future
+session should pick this back up once an `OPENAI_API_KEY` (planned) lets a
+direct-to-OpenAI transcription path be tried — see the gaps below for what
+to test.
+
+**Scope, narrower than the original plan**: only short, unambiguous
+interjections — no "like"/"so"/"actually", no multi-word fillers ("you
+know", "i mean"). Every dictionary word is safe to auto-detect with no
+false-positive risk, so the UX is a lightweight confirm-with-counts step
+("um × 2, uh × 1" + Remove/Cancel), not the per-occurrence checkbox review
+the original plan sketched.
+
+**Bilingual via per-word script detection, not a language setting**:
+`utils/fillerWords.ts`'s `isFillerWord(word)` checks Arabic-range characters
+against an Arabic dictionary, everything else against an English one. No
+project-level language field anywhere. Normalization strips punctuation,
+lowercases, collapses elongated repeats, and (Arabic only) strips diacritics
+and unifies alef variants — confirmed necessary live, not just in theory: a
+plain "اه" round-tripped through a real Cartesia → Whisper pass as "آه"
+instead.
+
+**Two real upstream gaps found and confirmed live, both deliberately left
+unfixed**:
+1. OpenRouter's `openai/whisper-large-v3` transcription endpoint mistranslates
+   non-English audio to English when no `language` param is sent —
+   `response.language` even reports `"en"` for genuinely Arabic input.
+   Explicit `language: "ar"` fixes it completely. No way to know which
+   language to request without asking the user first; needs a persisted
+   per-project language setting to fix for real. Raised with the user,
+   explicitly deferred rather than fixed as part of this feature.
+2. Whisper frequently **drops filler words from its own transcript
+   entirely** — confirmed on real Cartesia-synthesized audio, both English
+   and Arabic, that clearly spoke them. Every model variant OpenRouter
+   exposes for this endpoint (`whisper-large-v3`, `whisper-1`,
+   `whisper-large-v3-turbo`) and every parameter that could plausibly help
+   (`prompt`, `initial_prompt`, `temperature`, `condition_on_previous_text`,
+   `suppress_tokens`, provider routing hints) were tried live — **none
+   changed the output at all**. This endpoint only appears to honor `file`/
+   `model`/`response_format`/`timestamp_granularities`/`language`; everything
+   else is silently ignored. Not fixable without a different transcription
+   provider (direct OpenAI key, Groq, Deepgram, …) — out of scope here. This
+   feature can only catch whichever filler words survive Whisper's own
+   cleanup.
+
+**Mechanics, shared with silence removal, not duplicated**: `utils/
+clipSplice.ts`'s `spliceKeepRanges` (extracted from `silenceDetection.ts`'s
+splice tail, along with the `KeepRange` type) is the common "keepRanges →
+spliced AudioBuffer" step both features now call — same channelCount-
+explicit fix (see "Silence removal" above) protecting both from one call
+site. Detection itself is separate: `utils/fillerWordDetection.ts`'s
+`detectFillerWords` scans a clip's transcript window (`wordsInWindow`,
+shared with search), pads each match (0.05s), merges cuts within 0.15s of
+each other, inverts to `keepRanges`. Only fully-contained words are touched.
+
+Considered and rejected: a silence-removal-style "drop tiny kept slivers"
+pass. Silence removal's version is safe — a short gap between two silences is
+presumptively near-silent junk. Here it's not: a short gap between two
+filler-word cuts is real audio (could be a genuine short word), so dropping
+it on length alone risks deleting real content. Not added. One low-severity,
+disclosed edge case remains: a filler word right at a clip's own boundary can
+leave a brief residual sliver there, since there's no neighboring cut to
+merge with.
+
+`hooks/useFillerWordRemoval.ts` mirrors `useRemoveSilence.ts` but splits
+detect from apply: `detectForClip()` is synchronous/cheap (reads the
+transcript, touches no audio) and opens a confirm summary or a "nothing to
+do" toast; `confirmPending()` does the actual splice/commit, with the same
+discipline as silence removal otherwise (single-flight, pre-commit boundary
+re-check, remap-not-retranscribe, one `commit()`).
+
+**Cross-feature guard**: `useRemoveSilence.ts` and `useFillerWordRemoval.ts`
+are each independently single-flight but didn't coordinate with each other —
+running both at once would stack two blocking overlays.
+`EditorShell.tsx`'s `isBusyProcessingClip = isRemovingSilence ||
+isRemovingFillerWords` gates both menu items and both toolbar buttons.
+
+**A second gap, found in a self-review pass after this feature first
+shipped**: `useUndoRedoShortcut`/`useDeleteClipShortcut` listen on `window`
+directly, so the confirm modal's backdrop (pointer-only) didn't stop
+Ctrl+Z/Delete from firing while it was open — undoing or deleting the clip a
+still-open confirmation was about to act on. Not a data-corruption risk
+(`confirmPending`'s pre-commit re-check already catches the mismatch and
+discards with an error toast) but confusing. Fixed by folding
+`pending !== null` into `editorBusy`. Regression test added — it caught a
+stale dev server serving pre-fix code on its first run, a small confirmation
+the test was exercising the real path.
+
+**Files**: `utils/fillerWords.ts`, `utils/fillerWordDetection.ts`,
+`utils/clipSplice.ts`, `hooks/useFillerWordRemoval.ts`,
+`components/filler-words/FillerWordConfirmModal.tsx`, a new
+`RemoveFillerWordsIcon` in `ClipActionIcons.tsx` (speech bubble + three dots
++ strikethrough — visually checked at 16px and 96px before settling on this;
+an earlier wavy-line version was too cluttered at menu-item size).
+
+**Verification**: Node-side unit pass first (`utils/fillerWords.ts`/
+`fillerWordDetection.ts`), promoted into `e2e/fillerWordLogic.spec.ts` (21
+tests). Full browser-flow coverage in `e2e/fillerWordRemoval.spec.ts` (11
+tests) — transcript-readiness gate, confirm summary counts, cancel, no-match
+toast, undo, overlay/aria-disabled re-enable, toast auto-dismiss, reload
+round trip, remap-not-retranscribe, and the Ctrl+Z regression above. All mock
+`/api/transcribe` at the browser level, so they run deterministically
+without live OpenRouter/Cartesia access. Full suite (157 tests) passed
+against a fresh prod build. **Not verified**: a live TTS → upload →
+transcribe → remove-filler-words pass through the real UI — attempted,
+blocked mid-setup by the session's Cartesia account running out of TTS
+credits (unrelated to any app code); the user verified manually instead. The
+two upstream gaps above were each confirmed with real Cartesia → OpenRouter
+round trips before that account ran out, so the transcription side of this
+feature has been exercised against the real API even without a full
+real-speech UI pass.
 
 ## Critical setup gotchas (do not re-discover these)
 
@@ -1743,3 +1870,13 @@ what's described below. In `ClipDragLayer.tsx`:
   WAV `Blob` in memory simultaneously — a rough 3-hour stereo 16-bit render
   is on the order of ~2GB for the Blob alone. Same unstress-tested-at-scale
   risk the playback memory limitation above already flags, just compounded.
+- **Non-English transcription silently mistranslates to English** — OpenRouter's
+  Whisper endpoint ignores auto-detection without an explicit `language`
+  param (confirmed live: Arabic audio → English text, `response.language`
+  reporting `"en"`). No project-level language setting exists to fix this.
+  See "Filler-word removal" above for the full finding.
+- **Whisper often drops filler words from its own transcript** — "um"/"uh"
+  frequently never make it into the word list at all, confirmed live on both
+  English and Arabic audio, across every model/parameter combination
+  OpenRouter exposes. Filler-word removal can only catch what survives. See
+  "Filler-word removal" above.
