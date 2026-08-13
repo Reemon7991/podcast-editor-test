@@ -3,8 +3,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "../ui/Button";
-import { CARTESIA_VOICES, DEFAULT_CARTESIA_VOICE_ID, MAX_TTS_TEXT_LENGTH } from "../../utils/cartesiaVoices";
+import { DEFAULT_CARTESIA_VOICE_ID, MAX_TTS_TEXT_LENGTH } from "../../utils/cartesiaVoices";
 import { useGenerateSpeech } from "../../hooks/useGenerateSpeech";
+import { useCartesiaVoices } from "../../hooks/useCartesiaVoices";
+import { useVoicePreviewPlayer } from "../../hooks/useVoicePreviewPlayer";
+import { VoicePicker } from "./VoicePicker";
 
 interface GenerateSpeechModalProps {
   /** `activeTrackIdRef.current` read by the caller at open time — same
@@ -31,6 +34,8 @@ export function GenerateSpeechModal({ trackId, insertionTimeSeconds, onClose }: 
   const [text, setText] = useState("");
   const [voiceId, setVoiceId] = useState(DEFAULT_CARTESIA_VOICE_ID);
   const { generateSpeech, isGenerating, error } = useGenerateSpeech();
+  const { voices } = useCartesiaVoices();
+  const { playingVoiceId, loadingVoiceId, error: previewError, toggle: togglePreview } = useVoicePreviewPlayer();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const titleId = useId();
 
@@ -49,7 +54,8 @@ export function GenerateSpeechModal({ trackId, insertionTimeSeconds, onClose }: 
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isGenerating, onClose]);
 
-  const canGenerate = trackId !== null && text.trim().length > 0 && !isGenerating;
+  const overLimit = text.length > MAX_TTS_TEXT_LENGTH;
+  const canGenerate = trackId !== null && text.trim().length > 0 && !overLimit && !isGenerating;
 
   const handleGenerate = () => {
     if (!canGenerate || trackId === null) return;
@@ -84,32 +90,41 @@ export function GenerateSpeechModal({ trackId, insertionTimeSeconds, onClose }: 
             onChange={(e) => setText(e.target.value)}
             disabled={isGenerating}
             rows={5}
-            maxLength={MAX_TTS_TEXT_LENGTH}
             placeholder="Type the words you want spoken…"
             className="w-full resize-none rounded-lg border border-[var(--border)] p-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-purple-500)] disabled:opacity-60"
           />
+          {/* No `maxLength` on the textarea on purpose — that silently clips
+              a long paste with zero feedback. Show the count instead and let
+              Generate itself block over-limit text. */}
+          <div className="mt-1 flex items-start justify-between gap-2">
+            <span className="flex-1 text-xs text-red-600">
+              {overLimit
+                ? `${(text.length - MAX_TTS_TEXT_LENGTH).toLocaleString()} characters over the limit.`
+                : error}
+            </span>
+            <span className={`shrink-0 text-xs ${overLimit ? "text-red-600" : "text-[var(--text-muted)]"}`}>
+              {text.length.toLocaleString()} / {MAX_TTS_TEXT_LENGTH.toLocaleString()}
+            </span>
+          </div>
         </label>
 
-        <label className="mb-4 block text-sm">
-          <span className="mb-1 block text-[var(--text-muted)]">Voice</span>
-          <select
-            value={voiceId}
-            onChange={(e) => setVoiceId(e.target.value)}
+        <div className="mb-4">
+          <span className="mb-1 block text-sm text-[var(--text-muted)]">Voice</span>
+          <VoicePicker
+            voices={voices}
+            voiceId={voiceId}
+            onSelectVoice={setVoiceId}
             disabled={isGenerating}
-            className="w-full rounded-lg border border-[var(--border)] bg-white p-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-purple-500)] disabled:opacity-60"
-          >
-            {CARTESIA_VOICES.map((voice) => (
-              <option key={voice.id} value={voice.id}>
-                {voice.name}
-              </option>
-            ))}
-          </select>
-        </label>
+            playingVoiceId={playingVoiceId}
+            loadingVoiceId={loadingVoiceId}
+            onTogglePreview={togglePreview}
+          />
+          {previewError && <p className="mt-1 text-xs text-red-600">{previewError}</p>}
+        </div>
 
         {trackId === null && (
           <p className="mb-3 text-xs text-red-600">Add a track first.</p>
         )}
-        {error && <p className="mb-3 text-xs text-red-600">{error}</p>}
 
         <div className="flex justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={onClose} disabled={isGenerating}>

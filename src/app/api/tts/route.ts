@@ -17,7 +17,9 @@ import { isKnownCartesiaVoiceId, MAX_TTS_TEXT_LENGTH } from "../../../utils/cart
  * outgoing request shape, retry behavior below) does the right thing.
  */
 
-const CARTESIA_TIMEOUT_MS = 30_000;
+// 90s, not 30s — headroom for the raised MAX_TTS_TEXT_LENGTH (longer text
+// takes proportionally longer to synthesize).
+const CARTESIA_TIMEOUT_MS = 90_000;
 
 // Cartesia's synchronous "bytes" TTS endpoint. Exact path, header names, and
 // request/response field names below are this session's best knowledge of
