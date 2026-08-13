@@ -1,7 +1,16 @@
 import { test, expect, type Page } from "@playwright/test";
 import * as fs from "fs";
 import { makeSineWavFile, makeSegmentedWavFile, makeStereoSegmentedWavFile, type WavSegment } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, rebuildsEngine, readWav } from "./helpers";
+import {
+  SELECTORS,
+  waitForWaveformReady,
+  uploadFiles,
+  gotoEditor,
+  rebuildsEngine,
+  readWav,
+  waitForTranscriptSettled,
+  readTranscripts,
+} from "./helpers";
 
 const UNDO = { name: "Undo" } as const;
 const REMOVE_SILENCE = { name: /^Remove silence$|^Removing silence…$/ } as const;
@@ -236,5 +245,65 @@ test.describe("Remove silence", () => {
     // Genuinely different content, not the left channel duplicated onto
     // both — which is exactly what the channelCount bug above would produce.
     expect(rightPeak).toBeLessThan(leftPeak * 0.6);
+  });
+
+  /**
+   * Remap-not-retranscribe — see TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's
+   * Phase 4. `/api/transcribe` is mocked at the browser level; a request
+   * counter proves the splice's new transcript came from the local remap
+   * (utils/transcriptRemap.ts), not a second network call.
+   */
+  test("silence removal remaps the source transcript locally instead of re-transcribing", async ({ page }) => {
+    await gotoEditor(page);
+
+    let transcribeCallCount = 0;
+    await page.route("**/api/transcribe", (route) => {
+      transcribeCallCount++;
+      const words = [
+        { word: "one", start: 0.3, end: 0.6 }, // first tone [0,1) — kept
+        { word: "stray", start: 1.5, end: 1.8 }, // first silence [1,2.5) — dropped
+        { word: "two", start: 3.0, end: 3.3 }, // second tone [2.5,3.5) — kept
+        { word: "gone", start: 4.0, end: 4.3 }, // second silence [3.5,5) — dropped
+        { word: "three", start: 5.3, end: 5.6 }, // third tone [5,6) — kept
+      ];
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ words }) });
+    });
+
+    await uploadFiles(page, [makeSegmentedWavFile("gaps.wav", SEGMENTS)]);
+    const original = await waitForTranscriptSettled(page);
+    expect(transcribeCallCount).toBe(1);
+
+    const clip = page.locator(SELECTORS.draggableClip).first();
+    await clip.hover();
+    await (await clipActionsButtonFor(page, clip)).click();
+    const commitStart = Date.now();
+    await page.getByRole("menuitem", REMOVE_SILENCE).click();
+    await expect(page.getByText("Silence removed.")).toBeVisible();
+
+    // The new asset's transcript should appear essentially immediately —
+    // real network latency (confirmed elsewhere in this suite's mocks, and
+    // in practice against the real OpenRouter API) is at minimum tens of
+    // milliseconds, typically hundreds+. A remap is synchronous local work.
+    await expect
+      .poll(async () => (await readTranscripts(page)).length, { timeout: 2000 })
+      .toBe(2);
+    const remapElapsedMs = Date.now() - commitStart;
+    expect(remapElapsedMs).toBeLessThan(1000);
+
+    // The real proof: no second call to /api/transcribe.
+    expect(transcribeCallCount).toBe(1);
+
+    const transcripts = await readTranscripts(page);
+    const newTranscript = transcripts.find((t) => t.assetId !== original.assetId)!;
+    expect(newTranscript.status).toBe("done");
+    const words = newTranscript.words!.map((w) => w.word);
+    expect(words).toEqual(["one", "two", "three"]); // stray/gone correctly dropped
+
+    // "two" and "three" both shifted left (silence removed ahead of them) —
+    // not left unshifted, which is what re-transcribing the *original*
+    // audio unchanged would have produced.
+    const originalTwo = original.words!.find((w) => w.word === "two")!;
+    const remappedTwo = newTranscript.words!.find((w) => w.word === "two")!;
+    expect(remappedTwo.start).toBeLessThan(originalTwo.start);
   });
 });
