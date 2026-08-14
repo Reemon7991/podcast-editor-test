@@ -12,6 +12,7 @@ import {
 import { ClipActionsMenu, type ClipMenuAction } from "./ClipActionsMenu";
 import { FadeHandles } from "./FadeHandles";
 import { TrimHandleBars } from "./TrimHandleBars";
+import { SplitIcon, DuplicateIcon, DeleteIcon, RemoveSilenceIcon } from "./ClipActionIcons";
 import type { SelectedClip } from "./ClipActionsToolbar";
 import type { UseScissorsSplitResult } from "../../hooks/useScissorsSplit";
 import { useFadeDragHandlers } from "../../hooks/useFadeDragHandlers";
@@ -88,6 +89,12 @@ function clampedButtonPosition(
 interface ClipActionsOverlayProps {
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
+  onRemoveSilence: (trackId: string, clip: AudioClip) => void;
+  /** Id of the clip currently being processed, or null when idle. Disables
+   *  "Remove silence" on every clip's menu while set (removeSilence is
+   *  app-wide single-flight, not per-clip — see useRemoveSilence.ts), and
+   *  drives the busy label on the one matching clip. */
+  processingClipId: string | null;
   /** Threaded through to useFadeDragHandlers — see its own doc comment and
    *  transport/PlayButton.tsx / timeline/ClipDragLayer.tsx for the play()/
    *  rebuild race this guards against. A fade-drag commit reaches
@@ -159,6 +166,8 @@ interface ClipActionsOverlayProps {
 export function ClipActionsOverlay({
   onDuplicateClip,
   onDeleteClip,
+  onRemoveSilence,
+  processingClipId,
   playPendingRef,
   scrollEl,
   scissors,
@@ -349,37 +358,64 @@ export function ClipActionsOverlay({
     setHovered(null);
   };
 
-  const buildActions = (track: ClipTrack, clip: AudioClip): ClipMenuAction[] => [
-    {
-      id: "split",
-      label: "Split",
-      onSelect: () => {
-        scissors.activate();
-        closeAndReset();
+  const buildActions = (track: ClipTrack, clip: AudioClip): ClipMenuAction[] => {
+    const actions: ClipMenuAction[] = [
+      {
+        id: "split",
+        label: "Split",
+        icon: <SplitIcon />,
+        onSelect: () => {
+          scissors.activate();
+          closeAndReset();
+        },
       },
-    },
-    {
-      id: "duplicate",
-      label: "Duplicate",
-      onSelect: () => {
-        // Duplicate/delete both go through `commit`, which stops playback
-        // first if needed on its own now — see projectStore.ts's
-        // `stopIfPlaying`/`registerStopIfPlaying` doc comment. No local guard
-        // needed here anymore.
-        onDuplicateClip(track.id, clip.id);
-        closeAndReset();
+      {
+        id: "duplicate",
+        label: "Duplicate",
+        icon: <DuplicateIcon />,
+        onSelect: () => {
+          // Duplicate/delete both go through `commit`, which stops playback
+          // first if needed on its own now — see projectStore.ts's
+          // `stopIfPlaying`/`registerStopIfPlaying` doc comment. No local guard
+          // needed here anymore.
+          onDuplicateClip(track.id, clip.id);
+          closeAndReset();
+        },
       },
-    },
-    {
-      id: "delete",
-      label: "Delete",
-      destructive: true,
-      onSelect: () => {
-        onDeleteClip(track.id, clip.id);
-        closeAndReset();
+      {
+        id: "delete",
+        label: "Delete",
+        icon: <DeleteIcon />,
+        destructive: true,
+        onSelect: () => {
+          onDeleteClip(track.id, clip.id);
+          closeAndReset();
+        },
       },
-    },
-  ];
+    ];
+
+    // Audio-only feature — MIDI clips have nothing for it to act on.
+    if (!clip.midiNotes) {
+      actions.push({
+        id: "remove-silence",
+        label: processingClipId === clip.id ? "Removing silence…" : "Remove silence",
+        icon: <RemoveSilenceIcon />,
+        // Visually separated (a thin divider, via separatorBefore) from the
+        // plain edit actions above — this operates on the whole clip's audio
+        // rather than just moving/removing it outright.
+        separatorBefore: true,
+        // App-wide single-flight (useRemoveSilence.ts), not per-clip — every
+        // clip's item disables while any one is running, not just this one.
+        disabled: processingClipId !== null,
+        onSelect: () => {
+          onRemoveSilence(track.id, clip);
+          closeAndReset();
+        },
+      });
+    }
+
+    return actions;
+  };
 
   // One label per clip, masking the vendor's own ClipHeader text underneath.
   // @waveform-playlist/ui-components' ClipHeader always renders the *track's*

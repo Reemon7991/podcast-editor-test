@@ -12,6 +12,8 @@ import {
 } from "@waveform-playlist/browser";
 import { Button } from "../ui/Button";
 import { LoadingState } from "../ui/LoadingState";
+import { WarningBanner } from "../ui/WarningBanner";
+import { Toast } from "../ui/Toast";
 import { TopBar } from "../layout/TopBar";
 import { BottomBar } from "../transport/BottomBar";
 import { ClipDragLayer } from "./ClipDragLayer";
@@ -19,9 +21,11 @@ import { ClipActionsOverlay } from "../clip-menu/ClipActionsOverlay";
 import { AddClipsDropZone } from "./AddClipsDropZone";
 import type { SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { useScissorsSplit } from "../../hooks/useScissorsSplit";
+import { useRemoveSilence } from "../../hooks/useRemoveSilence";
 import { resolveClipAt } from "../../utils/clipGeometry";
 import { TRACK_ROW_HEIGHT_PX } from "../../utils/trackLayout";
 import { useUndoRedoShortcut } from "../../hooks/useUndoRedoShortcut";
+import { useDeleteClipShortcut } from "../../hooks/useDeleteClipShortcut";
 import { useProjectExport } from "../../hooks/useProjectExport";
 import {
   registerStopIfPlaying,
@@ -33,6 +37,9 @@ import {
 interface EditorShellProps {
   /** Undefined hides every track's close button — see TimelineStageProps. */
   onRemoveTrack: ((trackIndex: number) => void) | undefined;
+  /** True while a clip is decoding after an upload/drop — see
+   *  TimelineStageProps' own doc comment. */
+  isImportingClip: boolean;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
@@ -42,14 +49,42 @@ interface EditorShellProps {
 /**
  * Renders inside WaveformPlaylistProvider. Split out from AudioTrackLoader so
  * this subtree only mounts once the provider context actually exists.
+ *
+ * useRemoveSilence() is called *here*, not lifted to PodcastEditor.tsx like
+ * useClipActions/useTimelineTracks — deliberately. Its processingClipId/
+ * toast state changes independently of any store commit() (it toggles
+ * around an async detect/splice pipeline that may commit nothing at all,
+ * e.g. "no silence detected"). TimelineStage.tsx sits *above* this
+ * component and recomputes `hydrate(tracks)` fresh — a brand new array
+ * reference, forcing a full engine rebuild — on *every* render where its
+ * own passthrough cache is stale (true after any plain commit(), since
+ * only commitEngineOutput populates it; see its own doc comment). A prop
+ * threaded down through TimelineStage that changes on its own would make
+ * TimelineStage re-render (and thus rebuild the engine) on every value
+ * change, independent of whether anything on the timeline actually
+ * changed — confirmed by instrumenting commit()/commitEngineOutput()
+ * directly and observing an extra "waveform-playlist:ready" dispatch with
+ * neither ever firing. Keeping this hook (and its toast/overlay) entirely
+ * below TimelineStage means its state changes only re-render this
+ * subtree, never TimelineStage itself.
  */
 export function EditorShell({
   onRemoveTrack,
+  isImportingClip,
   onAddTrack,
   onAddFilesToTrack,
   onDuplicateClip,
   onDeleteClip,
 }: EditorShellProps) {
+  const {
+    removeSilence,
+    processingClipId,
+    toast: silenceToast,
+    dismissToast: dismissSilenceToast,
+    saveWarning: silenceSaveWarning,
+    dismissSaveWarning: dismissSilenceSaveWarning,
+  } = useRemoveSilence();
+  const isRemovingSilence = processingClipId !== null;
   const { isReady, tracks, trackStates, timeScaleHeight, samplesPerPixel, sampleRate, playoutRef } =
     usePlaylistData();
 
@@ -136,6 +171,29 @@ export function EditorShell({
       ? selectedClipRaw
       : null;
 
+  // Resolves `selectedClip`'s ids to the actual track/clip objects — needed
+  // for the top-bar "Remove silence" button below, since removeSilence()
+  // (useRemoveSilence.ts) takes a real AudioClip, not just an id. Re-resolved
+  // fresh every render from the live `tracks` array (same approach
+  // ClipActionsOverlay.tsx already uses for its own selection ring), so it
+  // can't go stale across a drag/undo/split the way a cached reference could.
+  const selectedTrackForToolbar = selectedClip
+    ? tracks.find((t) => t.id === selectedClip.trackId)
+    : undefined;
+  const selectedClipForToolbar = selectedTrackForToolbar?.clips.find(
+    (c) => c.id === selectedClip?.clipId
+  );
+  // Audio-only feature — MIDI clips have nothing for it to act on, same
+  // guard ClipActionsOverlay.tsx's per-clip menu already applies. Not
+  // reachable via this app's UI today (no MIDI import path exists), kept for
+  // parity with that guard rather than assuming it can never matter.
+  const canRemoveSilenceSelected = !!selectedClipForToolbar && !selectedClipForToolbar.midiNotes;
+  const handleRemoveSilenceSelected = () => {
+    if (selectedTrackForToolbar && selectedClipForToolbar) {
+      removeSilence(selectedTrackForToolbar.id, selectedClipForToolbar);
+    }
+  };
+
   // Registers this provider's actual stop()/isPlaying with the project store
   // (see projectStore.ts's own doc comment on stopIfPlaying/
   // registerStopIfPlaying) so `commit`/`undo`/`redo` — called from outside
@@ -162,8 +220,12 @@ export function EditorShell({
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
-  // same isReady/isExporting signals already gating TopBar/BottomBar below.
-  useUndoRedoShortcut(isReady && !isExporting);
+  // same isReady/isExporting/isRemovingSilence/isImportingClip signals
+  // already gating TopBar/BottomBar below.
+  const editorBusy = !isReady || isExporting || isRemovingSilence || isImportingClip;
+  useUndoRedoShortcut(!editorBusy);
+  // Delete/Backspace deletes the selected clip — see useDeleteClipShortcut.ts.
+  useDeleteClipShortcut(!editorBusy, selectedClip, onDeleteClip);
 
   // Ref updates must happen outside render (React disallows mutating a ref's
   // `.current` during render).
@@ -252,6 +314,10 @@ export function EditorShell({
 
   return (
     <div className="flex flex-col gap-3">
+      {silenceSaveWarning && (
+        <WarningBanner message={silenceSaveWarning} onDismiss={dismissSilenceSaveWarning} />
+      )}
+      {silenceToast && <Toast message={silenceToast} onDismiss={dismissSilenceToast} />}
       {/* Cross-track clip moves go through onTracksChange directly (see
        *  ClipDragLayer.tsx), which the provider can only apply via a full
        *  engine rebuild — dispose + rebuild the Tone.js engine for every
@@ -260,11 +326,13 @@ export function EditorShell({
        *  (init() awaited on the pre-rebuild engine, play() then fired on the
        *  post-rebuild one) that throws "TonePlayout not initialized" if Play
        *  is pressed mid-rebuild. isReady is the provider's own rebuild-done
-       *  signal — gating the transport bar on it closes that window. */}
+       *  signal — gating the transport bar on it closes that window. Also
+       *  gated on isRemovingSilence/isImportingClip, same treatment as
+       *  isExporting — see the editing overlays below. */}
       <div
         data-testid="top-bar"
-        className={isReady && !isExporting ? undefined : "pointer-events-none opacity-50"}
-        aria-disabled={!isReady || isExporting}
+        className={editorBusy ? "pointer-events-none opacity-50" : undefined}
+        aria-disabled={editorBusy}
       >
         <TopBar
           onAddFilesToTrack={onAddFilesToTrack}
@@ -276,6 +344,9 @@ export function EditorShell({
           onSplitSelected={scissors.activate}
           onDuplicateClip={onDuplicateClip}
           onDeleteClip={onDeleteClip}
+          onRemoveSilenceSelected={handleRemoveSilenceSelected}
+          canRemoveSilenceSelected={canRemoveSilenceSelected}
+          isRemovingSilence={isRemovingSilence}
         />
       </div>
       <div className="relative overflow-hidden rounded-xl border border-[var(--border)]">
@@ -290,6 +361,8 @@ export function EditorShell({
             <ClipActionsOverlay
               onDuplicateClip={onDuplicateClip}
               onDeleteClip={onDeleteClip}
+              onRemoveSilence={removeSilence}
+              processingClipId={processingClipId}
               playPendingRef={playPendingRef}
               scrollEl={scrollEl}
               scissors={scissors}
@@ -318,6 +391,31 @@ export function EditorShell({
             <LoadingState message="Exporting…" />
           </div>
         )}
+        {/* Blocks editing while silence removal is in flight — same
+         *  full-editor treatment as export above, requested over the
+         *  original narrower "only disable this clip's own menu item"
+         *  design: simpler to reason about, and matches the one other
+         *  async, potentially-slow mutation this app already has. */}
+        {isRemovingSilence && (
+          <div
+            data-testid="silence-removal-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Removing silence…" />
+          </div>
+        )}
+        {/* Blocks editing while an uploaded/dropped clip is still decoding —
+         *  same full-editor treatment as export/silence removal above, so a
+         *  large file doesn't leave the user waiting with no indication
+         *  anything is happening. */}
+        {isImportingClip && (
+          <div
+            data-testid="clip-import-overlay"
+            className="absolute inset-0 z-[500] flex items-center justify-center bg-white/80"
+          >
+            <LoadingState message="Loading new clip…" />
+          </div>
+        )}
       </div>
       {/* Fixed to the viewport, not the page's own scroll — so play/pause
        *  (and the rest of the transport controls) always stays reachable
@@ -333,9 +431,9 @@ export function EditorShell({
       <div
         data-testid="transport-bar"
         className={`fixed inset-x-0 bottom-0 z-[200] px-6 pb-4 ${
-          isReady && !isExporting ? "" : "pointer-events-none opacity-50"
+          editorBusy ? "pointer-events-none opacity-50" : ""
         }`}
-        aria-disabled={!isReady || isExporting}
+        aria-disabled={editorBusy}
       >
         <BottomBar playPendingRef={playPendingRef} />
       </div>

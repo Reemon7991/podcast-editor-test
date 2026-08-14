@@ -2,6 +2,42 @@ import type { Page } from "@playwright/test";
 import type { UploadFile } from "./fixtures";
 
 /**
+ * Reads this app's own fixed 44-byte-header 16-bit PCM WAV layout (matches
+ * @waveform-playlist/browser/tone's encodeWav — see useProjectExport.ts —
+ * and utils/wavEncode.ts's own encoder). `channel` (0 = left/mono, 1 =
+ * right) lets a caller inspect one specific channel of interleaved
+ * multi-channel audio, e.g. confirming stereo content survived a mutation
+ * distinct per-channel rather than collapsing to mono.
+ */
+export function readWav(buffer: Buffer) {
+  const sampleRate = buffer.readUInt32LE(24);
+  const numChannels = buffer.readUInt16LE(22);
+  const dataSize = buffer.readUInt32LE(40);
+  const numSamples = dataSize / 2 / numChannels;
+  const duration = numSamples / sampleRate;
+  return {
+    sampleRate,
+    numChannels,
+    duration,
+    sampleAt: (timeSeconds: number, channel = 0) => {
+      const frame = Math.round(timeSeconds * sampleRate);
+      return buffer.readInt16LE(44 + (frame * numChannels + channel) * 2) / 32768;
+    },
+    maxAbsInWindow: (startSeconds: number, windowSeconds: number, channel = 0) => {
+      const startFrame = Math.round(startSeconds * sampleRate);
+      const frameCount = Math.round(windowSeconds * sampleRate);
+      let max = 0;
+      for (let frame = startFrame; frame < startFrame + frameCount; frame++) {
+        const offset = 44 + (frame * numChannels + channel) * 2;
+        if (offset + 2 > buffer.length) break;
+        max = Math.max(max, Math.abs(buffer.readInt16LE(offset) / 32768));
+      }
+      return max;
+    },
+  };
+}
+
+/**
  * Shared selectors, established across this project's prior ad-hoc
  * verification passes (see CLAUDE.md's "Verification approach" and
  * PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 0) and now promoted here so

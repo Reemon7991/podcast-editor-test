@@ -77,15 +77,21 @@ those two; the AI features are the most speculative and probably last).
 5. **Audio effects** — per-clip or per-track processing (EQ, compression,
    gain automation, etc. — scope not yet defined).
 6. **AI features** — text-to-speech, noise removal, humming removal, silence
-   removal. Almost certainly needs server-side processing (not in-browser
-   WebAudio) — scope, model/service choice, and where the compute runs are
-   mostly open, except for TTS: **done** (Cartesia, backend-owned request via
+   removal. Scope, model/service choice, and where the compute runs are
+   mostly open per-feature (not a blanket "needs a server" — see below),
+   except for TTS: **done** (Cartesia, backend-owned request via
    a Next.js Route Handler, triggered from a "+ Clip" toolbar dropdown,
    inserted at the playhead through the existing upload clip-insertion
    pipeline) — see "Text-to-Speech (Cartesia)" below for the actual
    implementation and the real bugs found building it; `TTS_CARTESIA_PLAN.md`
    is the original design doc, kept corrected (not left stale) against what
-   actually shipped. Noise/humming/silence removal remain fully open.
+   actually shipped. Silence removal: **done** (energy/RMS-based, fully
+   client-side — no server round trip needed for this one, unlike the
+   blanket note above originally assumed) — see "Silence removal" below for
+   the actual implementation and the real bugs found building and then
+   actually using it; `SILENCE_REMOVAL_PLAN.md` is the original design doc,
+   kept corrected against what actually shipped, same discipline as
+   `TTS_CARTESIA_PLAN.md`. Noise/humming removal remain fully open.
 
 ## Architecture
 
@@ -1004,6 +1010,214 @@ indefinitely); `AddClipsDropZone.tsx` (the drag-and-drop upload strip at the
 bottom of the track list) stays upload-only by design, not offered as a
 second "Generate clip (AI)" entry point.
 
+## Silence removal (done)
+
+Energy/RMS-based, fully client-side, triggered from a clip's own "..." menu
+("Remove silence"). Splices the kept (non-silent) audio into one new
+continuous clip that replaces the original in place — same `startSample`,
+no ripple to the rest of the timeline, track's clip count unchanged. Full
+original design: `SILENCE_REMOVAL_PLAN.md`, kept corrected against what
+actually shipped (not left stale), including a detailed review pass and a
+UX rework both folded in after the initial build — same discipline as
+`PERSISTENCE_UNDO_ORIGINAL_PLAN.md`/`TTS_CARTESIA_PLAN.md`.
+
+**Files**: `src/utils/silenceDetection.ts` (`detectKeepRanges` — the
+windowed-RMS/percentile-threshold/hysteresis/padding algorithm — and
+`spliceOutSilence`, which wraps it plus the actual buffer splice),
+`src/utils/wavEncode.ts` (`encodeWavPcm16`, needed only to get bytes to hash
+and a `Blob` to persist — no standalone `AudioBuffer`→WAV encoder is
+exported anywhere in `@waveform-playlist/browser`), `src/hooks/
+useRemoveSilence.ts` (decode-or-compute-then-commit, mirrors
+`useGenerateSpeech.ts`'s shape), `src/components/ui/Toast.tsx` (the
+success/warning/error outcome toast — see "UX: overlay + toast" below),
+`src/components/ui/WarningBanner.tsx` (extracted out of `PodcastEditor.tsx`,
+now shared by both it and `EditorShell.tsx`). Wired into `src/components/
+clip-menu/ClipActionsOverlay.tsx`'s existing per-clip menu and `src/
+components/timeline/EditorShell.tsx` (owns `useRemoveSilence()` — see why
+below).
+
+**Algorithm** (see `SILENCE_REMOVAL_PLAN.md` for the full spelled-out
+version): one RMS value per non-overlapping 20ms window (not per-sample —
+keeps the percentile sort cheap on long clips), max across channels: a
+noise floor is estimated as a low percentile (default 10th) of that
+per-window series, multiplied by a linear threshold factor (default 3, ≈
++9.5dB); contiguous below-threshold runs of at least 0.4s count as real
+silence (hysteresis, avoids chattering at every quiet phoneme); 0.1s of
+padding is pulled back into the kept side of every cut; kept slivers under
+0.1s after padding are folded into the surrounding silence. Reuses
+`@waveform-playlist/core`'s `concatenateAudioData`/`createAudioBuffer` for
+the actual splice rather than hand-rolling it.
+
+**Real bugs found building and then actually using this** — an unusually
+high count for one feature in this repo, because this is the first feature
+here verified at every layer: a Node-side unit pass against the pure
+algorithm *before* ever touching a browser (deliberately, per the
+implementation-order plan — cheapest place to catch algorithm bugs), then
+full browser/e2e verification, then a manual pass by the user against a
+real, non-synthetic recording:
+
+1. **Padding manufactured phantom "kept" slivers at the absolute start/end
+   of a buffer.** The padding step (pull the kept side of every cut inward
+   by `paddingSeconds`) was originally applied unconditionally to *every*
+   silence run's boundaries, including ones touching the buffer's own start
+   or end — where there's no real flanking content to give a lead-in/lead-
+   out cushion to. Most visible on a fully-silent clip: two padding-sized
+   slivers at the very ends survived the tiny-sliver merge and the clip
+   never read as "no speech found" at all. Caught by the Node-side unit
+   pass, not reasoning alone. Fixed: a silence run's boundary gets no
+   padding on whichever side touches the buffer's own edge.
+2. **A purely relative threshold can't tell "uniformly loud" (a constant-
+   level tone) apart from "uniformly near-silent"** — both look like "no
+   contrast" to a percentile-only check, but need opposite outcomes (leave
+   alone vs. this is all silence). Fixed with `ABSOLUTE_QUIET_FLOOR`
+   (~-50dBFS), used only to break that specific tie; the main threshold
+   stays fully relative/self-calibrating otherwise.
+3. **`rms <= threshold`, not `rms < threshold`.** True digital-zero silence
+   combined with a noise floor that also computes to exactly 0 never
+   matched a strict `<` against its own threshold (0 < 0 is false) — nothing
+   was ever classified as silence. Only surfaced once a real synthetic WAV
+   with literal-zero silence segments was run through the actual app in a
+   browser; the Node-side unit tests happened to use dithered near-zero
+   noise for "silence" (more realistic anyway) and never hit this. Real
+   recorded silence is never exactly 0, but digitally-generated/edited
+   silence can be — worth remembering if this ever regresses.
+4. **The biggest one: `processingClipId` threaded as a prop through
+   `TimelineStage.tsx` caused a spurious full engine rebuild on every
+   silence-removal call, independent of whether anything actually
+   changed.** `TimelineStage.tsx`'s `hydratedTracks = lastEngineOutput
+   ?.dehydrated === tracks ? lastEngineOutput.raw : hydrate(tracks)` only
+   reuses its cached array when that passthrough condition holds — true
+   only right after a `commitEngineOutput` call. After *any* plain
+   `commit()` (upload, duplicate, undo, redo — none of which touch
+   `lastEngineOutput`), that condition goes false and stays false until some
+   future trim/split re-establishes it — meaning **any** re-render of
+   `TimelineStage` in that window, for *any* reason, recomputes `hydrate()`
+   fresh (a brand-new top-level array, even with every individual track
+   object cache-hit-identical) and triggers a full rebuild. Nothing before
+   this feature ever exercised that path: existing state changes threaded
+   through `PodcastEditor.tsx` either landed in the same batched render as
+   a real `commit()` (masking the issue) or never fired in that window at
+   all. `processingClipId`, toggling on its own around an async pipeline
+   that often commits nothing at all ("no silence detected"), was the first.
+   Found by instrumenting `commit()`/`commitEngineOutput()` directly and
+   observing an extra `waveform-playlist:ready` dispatch with neither ever
+   firing. Fixed by moving `useRemoveSilence()` (and its overlay/toast)
+   entirely below `TimelineStage`, into `EditorShell.tsx` — its state
+   changes now only re-render that subtree, never `TimelineStage` itself.
+   Note this is a **latent bug in the app generally**, not something this
+   feature introduced: any future piece of state that changes independently
+   of a `commit()`, if threaded above `TimelineStage`, will hit the same
+   wall. Not fixed at the root (would mean reworking `TimelineStage`'s own
+   passthrough-cache/`hydrate()` architecture) — worked around here.
+5. **A concurrent-modification race the original "clip still exists" guard
+   didn't fully cover.** `removeSilence` captures a clip's boundaries once
+   and uses them for the whole async pipeline; trimming/dragging that same
+   clip is a separate interaction path (`ClipDragLayer.tsx`) never gated by
+   the single-flight guard, so the clip could still exist but have
+   different boundaries by the time the result is ready to commit. Fixed:
+   the pre-commit re-check compares `offsetSamples`/`durationSamples`/
+   `startSample` against the live clip, not just its existence, and
+   discards with a message if either changed.
+6. **Every e2e fixture was mono, so the `channelCount`-defaults-to-1
+   splice bug (below) had zero regression coverage** — mono is also that
+   bug's own buggy output, so a regression wouldn't have changed any
+   existing test's result. Added a stereo fixture
+   (`makeStereoSegmentedWavFile`, `e2e/fixtures.ts`) and a dedicated test;
+   confirmed it actually catches the regression via A/B (reverted the fix,
+   watched the test fail with `numChannels: 1`, restored it).
+7. **`createAudioBuffer`'s `channelCount` parameter defaults to 1** —
+   confirmed by reading `core/dist/index.js` directly. Omitting it on a
+   stereo clip doesn't throw; it silently drops every channel past the
+   first. `spliceOutSilence` always passes it explicitly now.
+8. **The loading overlay (see below) visibly waited before appearing on a
+   real recording** — reported directly by the user, not caught by any
+   automated test (small synthetic clips never made this visible).
+   `setProcessingClipId` only *schedules* a re-render; React can't actually
+   paint it until the calling code's own synchronous execution yields back
+   to the event loop, and the RMS scan + splice immediately after it is one
+   large synchronous, CPU-bound block that was itself delaying that yield —
+   so the menu stayed open and the overlay stayed hidden for the entire
+   scan, only updating once the (already-finished) work let the function
+   proceed. Fixed with a single `await new Promise(resolve =>
+   setTimeout(resolve, 0))` inserted right before the scan starts. Measured
+   against a real 10-minute synthetic clip: menu-close and overlay-visible
+   both now land within ~5ms of the click (previously stuck for the ~1s the
+   whole operation took); the overlay then correctly stays up for that full
+   ~1s. Not fully solved for a *much* longer clip's spinner staying
+   perfectly smooth throughout the scan itself (still one blocking
+   synchronous chunk after the yield) — chunking the scan loop or moving it
+   to a Web Worker would close that gap; not done here, since the reported
+   problem was specifically the pre-overlay delay, not an unresponsive
+   spinner during it.
+
+**UX: overlay + toast.** Originally shipped with a narrow, per-clip-menu-
+item busy indicator (disable/relabel just that one action). Revised after
+direct feedback to match Export's own established pattern instead: a full-
+editor-blocking overlay (`data-testid="silence-removal-overlay"`, identical
+markup to `export-overlay` — translucent scrim + spinner + message) while
+processing, with the top bar and transport bar disabled the same way
+`isExporting` already disables them. On completion, a new `Toast` component
+(`ui/Toast.tsx`) — fixed, bottom-center, pill-shaped, auto-dismisses after
+5s, still manually dismissible — reports the outcome: green for a real trim
+("Silence removed."), amber for a no-op ("No silence detected in this
+clip." / "No audio detected above the silence threshold."), red for a
+failure (an exception, or the clip vanishing/changing underneath the
+operation — see bug 5 above). Same shape/weight across all three, only the
+color changes, so they read as one family. Deliberately *not* used for a
+failed asset-persistence save (silence removed successfully, but the result
+couldn't be saved for offline use) — that has a lasting consequence (won't
+survive a reload) a 5-second toast would undersell, so it still uses the
+persistent, manually-dismissed `WarningBanner` pattern
+`useTimelineTracks.ts`'s own `saveWarning` already established.
+
+**Known, disclosed gaps**:
+
+- **The noise-floor percentile needs the clip's *aggregate* silence to be
+  roughly at least `noiseFloorPercentile` (10%) of its total duration to
+  calibrate correctly** — a real, inherent tradeoff of self-calibrating
+  (vs. one fixed) thresholding, not a bug. Confirmed directly against a
+  short manual test clip (a ~11s clip needed a gap of ~1.1s, not the nominal
+  0.4s minimum, before it was detected at all) — bites hardest on short
+  clips with only one deliberate gap; a real podcast's pauses usually sum to
+  well over 10% of total runtime across the whole episode, so this matters
+  less at this app's actual target scale. Reviewed and left as the shipped
+  default (`noiseFloorPercentile: 0.1`) at the user's explicit call, not
+  silently accepted without consideration.
+- **Two timing races found while testing are disclosed as unprovable, not
+  silently dropped**: the per-clip menu item's disabled state during
+  processing, and directly observing the overlay mid-flight in an automated
+  test. Both reproducibly failed even under 1000x CPU throttling and a
+  ~100s test clip — removeSilence's dominant cost (`crypto.subtle.digest` +
+  the IndexedDB write) doesn't run on the throttled main JS thread, unlike
+  the CPU-bound work CPU throttling actually slows. Same class of "not
+  solved by an automated test" race as the play()/rebuild race documented
+  above. Both are correct by inspection (`processingClipId` set
+  synchronously, cleared in `finally`, both gated identically to
+  `isExporting`); the committed suite instead asserts the provable half —
+  the editor is never left stuck disabled afterward.
+- **The RMS scan + splice remains one synchronous, unchunked block** once
+  it starts (see bug 8 above) — fine for this app's realistic clip lengths
+  (measured ~1s for a 10-minute clip), but a multi-hour clip could still
+  visibly freeze the spinner for a longer stretch. Chunking the loop with
+  periodic yields, or moving it to a Web Worker, would close this; neither
+  attempted here (`SILENCE_REMOVAL_PLAN.md`'s own "Not built" list already
+  flagged this as a deferred v2 risk).
+
+Committed coverage (`e2e/silenceRemoval.spec.ts`, 7 tests; `e2e/fixtures.ts`
+gained `makeSegmentedWavFile`/`makeStereoSegmentedWavFile`; `readWav` moved
+from `export.spec.ts` into `e2e/helpers.ts` and generalized with a
+per-channel argument so both files share one implementation): kept-duration
+matches a hand-computed reference clip via exactly one engine rebuild; undo
+restores the original clip and audio in one step; a silence-free clip is a
+genuine no-op (no rebuild, no new history entry); the editor is fully
+re-enabled after processing settles; the success toast auto-dismisses on
+its own after 5s; the spliced clip survives a reload and still plays; a
+stereo clip's channels stay distinct after removal (the regression test for
+bug 7, confirmed via A/B to actually catch it). Full suite (69 tests) passed
+repeatedly against a fresh prod build, plus a manual pass against a real
+10-minute synthetic recording measuring the actual UI-response timing (see
+bug 8) — not just the small clips the committed suite uses.
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -1032,6 +1246,11 @@ second "Generate clip (AI)" entry point.
   server-rendered on demand (confirmed in `npm run build`'s route summary:
   `ƒ /api/tts`, not prerendered), so it reads the env var at request time,
   but the process still needs to have loaded it at startup.
+- **`@waveform-playlist/core` is a direct dependency**, added for silence
+  removal's splice step (`concatenateAudioData`/`createAudioBuffer` — see
+  "Silence removal" below). It was already resolved transitively via
+  `browser`/`engine`/`ui-components` before this, so nothing new actually
+  installs; only `package.json` gained a manifest entry.
 
 ## Library findings worth remembering
 

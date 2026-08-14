@@ -21,6 +21,12 @@ interface TimelineStageProps {
    *  engine rebuild until the whole import batch settles, so adding several
    *  files doesn't trigger a rebuild per file. */
   deferEngineRebuild: boolean;
+  /** Same underlying flag as deferEngineRebuild (useTimelineTracks.ts's
+   *  isLoading) — passed through separately so EditorShell can show a
+   *  blocking "Loading new clip…" overlay, same treatment as isExporting/
+   *  isRemovingSilence, instead of leaving a large upload silently pending
+   *  with no visual feedback. */
+  isImportingClip: boolean;
   onAddTrack: () => void;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
@@ -30,6 +36,7 @@ interface TimelineStageProps {
 export function TimelineStage({
   onRemoveTrack,
   deferEngineRebuild,
+  isImportingClip,
   onAddTrack,
   onAddFilesToTrack,
   onDuplicateClip,
@@ -92,6 +99,7 @@ export function TimelineStage({
     >
       <EditorShell
         onRemoveTrack={onRemoveTrack}
+        isImportingClip={isImportingClip}
         onAddTrack={onAddTrack}
         onAddFilesToTrack={onAddFilesToTrack}
         onDuplicateClip={onDuplicateClip}

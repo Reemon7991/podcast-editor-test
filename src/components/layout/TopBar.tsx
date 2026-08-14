@@ -20,13 +20,16 @@ interface TopBarProps {
   onSplitSelected: () => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
+  onRemoveSilenceSelected: () => void;
+  canRemoveSilenceSelected: boolean;
+  isRemovingSilence: boolean;
 }
 
 /**
- * Top toolbar: project label + Undo/Redo (left) — Split/Duplicate/Delete
- * clip actions, disabled until a clip is selected (center) — Upload/Export
- * (right). Replaces the old single TransportControls bar's upload/export
- * responsibility; playback/zoom now live in BottomBar.tsx instead.
+ * Top toolbar: project label + Undo/Redo (left) — Split/Duplicate/Remove
+ * silence/Delete clip actions, disabled until a clip is selected (center) —
+ * Upload/Export (right). Replaces the old single TransportControls bar's
+ * upload/export responsibility; playback/zoom now live in BottomBar.tsx instead.
  */
 export function TopBar({
   onAddFilesToTrack,
@@ -38,6 +41,9 @@ export function TopBar({
   onSplitSelected,
   onDuplicateClip,
   onDeleteClip,
+  onRemoveSilenceSelected,
+  canRemoveSilenceSelected,
+  isRemovingSilence,
 }: TopBarProps) {
   const { currentTime } = usePlaybackAnimation();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -79,6 +85,9 @@ export function TopBar({
           onSplit={onSplitSelected}
           onDuplicate={onDuplicateClip}
           onDelete={onDeleteClip}
+          onRemoveSilence={onRemoveSilenceSelected}
+          canRemoveSilence={canRemoveSilenceSelected}
+          isRemovingSilence={isRemovingSilence}
         />
       </div>
 
