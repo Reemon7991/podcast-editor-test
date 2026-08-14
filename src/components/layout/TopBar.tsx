@@ -2,19 +2,20 @@
 
 import { useRef, useState, type ChangeEvent, type RefObject } from "react";
 import { usePlaybackAnimation } from "@waveform-playlist/browser";
-import { Button } from "../ui/Button";
 import { UndoRedoButtons } from "../transport/UndoRedoButtons";
 import { ClipActionsToolbar, type SelectedClip } from "../clip-menu/ClipActionsToolbar";
 import { MenuButton } from "../ui/MenuButton";
 import { GenerateSpeechModal } from "../tts/GenerateSpeechModal";
 import { SearchButton } from "../search/SearchButton";
+import { useExportFormatSupport } from "../../hooks/useExportFormatSupport";
+import { EXPORT_FORMAT_ORDER, exportFormatLabel, type ExportFormat } from "../../utils/exportFormats";
 
 interface TopBarProps {
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   /** Sticky ref owned by EditorShell — see TransportControls' previous doc
    *  comment on why this must be a ref, not a plain value. */
   activeTrackIdRef: RefObject<string | null>;
-  exportProject: () => Promise<unknown>;
+  exportProject: (format: ExportFormat) => Promise<unknown>;
   isExporting: boolean;
   exportError: string | null;
   selectedClip: SelectedClip | null;
@@ -74,6 +75,7 @@ export function TopBar({
   const [generateModalState, setGenerateModalState] = useState<{ trackId: string | null } | null>(
     null
   );
+  const exportFormatSupport = useExportFormatSupport();
 
   const handleUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -131,18 +133,24 @@ export function TopBar({
             },
           ]}
         />
-        <Button
-          variant="primary"
+        <MenuButton
+          label={isExporting ? "Exporting…" : "Export"}
           icon={<ExportIcon />}
-          onClick={() => {
-            exportProject().catch(() => {
-              // error is already surfaced via exportError above
-            });
-          }}
+          minWidth={190}
+          variant="primary"
           disabled={isExporting}
-        >
-          {isExporting ? "Exporting…" : "Export"}
-        </Button>
+          actions={EXPORT_FORMAT_ORDER.map((format) => ({
+            id: format,
+            label: exportFormatLabel(format),
+            disabled: !exportFormatSupport[format],
+            title: exportFormatSupport[format] ? undefined : "Not supported in this browser",
+            onSelect: () => {
+              exportProject(format).catch(() => {
+                // error is already surfaced via exportError above
+              });
+            },
+          }))}
+        />
         <input
           ref={inputRef}
           type="file"

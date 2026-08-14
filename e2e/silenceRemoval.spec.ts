@@ -231,7 +231,10 @@ test.describe("Remove silence", () => {
     await waitForWaveformReady(page);
 
     const downloadPromise = page.waitForEvent("download");
+    // Export is now a dropdown (WAV + compressed formats) — see
+    // export.spec.ts's own exportAs() helper for the same shape.
     await page.getByRole("button", { name: /Export/ }).click();
+    await page.getByRole("menuitem", { name: "WAV (lossless)" }).click();
     const download = await downloadPromise;
     const wav = readWav(fs.readFileSync((await download.path())!));
 

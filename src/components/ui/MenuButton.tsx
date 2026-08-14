@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "./Button";
+import { Button, type ButtonVariant } from "./Button";
 
 export interface MenuButtonAction {
   id: string;
@@ -12,6 +12,13 @@ export interface MenuButtonAction {
    *  otherwise (mixing icon and icon-less actions in the same menu is fine;
    *  each item lays itself out independently). */
   icon?: ReactNode;
+  /** Greys the item out and blocks onSelect — e.g. an export format this
+   *  browser's WebCodecs AudioEncoder can't produce (see
+   *  utils/exportFormats.ts's canEncodeFormat). */
+  disabled?: boolean;
+  /** Native tooltip, shown regardless of `disabled` — typically used to
+   *  explain *why* a disabled item is disabled. */
+  title?: string;
 }
 
 interface MenuButtonProps {
@@ -29,6 +36,16 @@ interface MenuButtonProps {
    *  sizes itself independently too, and ClipActionsMenu.tsx's own dropdown
    *  is sized for its own (shorter) "Split"/"Duplicate"/"Delete" labels. */
   minWidth?: number;
+  /** Disables the trigger itself (e.g. while an export is already running) —
+   *  same `disabled` the underlying `Button` already supports, just
+   *  forwarded through. */
+  disabled?: boolean;
+  /** Forwarded to the trigger `Button`'s own `variant`. Default "secondary"
+   *  matches every existing MenuButton use (e.g. "+ Clip"); pass "primary"
+   *  for a trigger that should stand out as the main call-to-action instead
+   *  (e.g. TopBar.tsx's "Export", which was a plain primary `Button` before
+   *  gaining a dropdown and should keep that same visual weight). */
+  variant?: ButtonVariant;
 }
 
 const DEFAULT_DROPDOWN_MIN_WIDTH = 160;
@@ -61,6 +78,8 @@ export function MenuButton({
   actions,
   icon,
   minWidth = DEFAULT_DROPDOWN_MIN_WIDTH,
+  disabled,
+  variant = "secondary",
 }: MenuButtonProps) {
   const [open, setOpen] = useState(false);
   const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
@@ -121,11 +140,12 @@ export function MenuButton({
     <>
       <Button
         ref={buttonRef}
-        variant="secondary"
+        variant={variant}
         icon={icon}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
       >
         {label}
       </Button>
@@ -148,11 +168,17 @@ export function MenuButton({
                 key={action.id}
                 type="button"
                 role="menuitem"
+                disabled={action.disabled}
+                title={action.title}
                 onClick={() => {
                   action.onSelect();
                   setOpen(false);
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--foreground)] hover:bg-[var(--accent-purple-50)]"
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                  action.disabled
+                    ? "cursor-not-allowed text-zinc-400"
+                    : "text-[var(--foreground)] hover:bg-[var(--accent-purple-50)]"
+                }`}
               >
                 {action.icon}
                 {action.label}

@@ -832,9 +832,11 @@ see the type-mismatch note above), any way to type an exact fade duration
 
 ## Export (done)
 
-Full mixdown to a downloadable WAV, via an "Export" button next to "Upload
-clip". Full plan: `.claude/plans/` history from the session that built this —
-the short version below is what a future session actually needs.
+Full mixdown to a downloadable file, via an "Export" dropdown next to
+"+ Clip" — WAV plus compressed MP3/AAC formats, see "Compressed export
+(MP3/AAC)" below for the latter. Full plan: `.claude/plans/` history from the
+session that built this — the short version below is what a future session
+actually needs.
 
 **Don't hand-roll an `OfflineAudioContext` mixdown** — `@waveform-playlist/
 browser` already ships one, at the `@waveform-playlist/browser/tone` subpath
@@ -879,14 +881,16 @@ instead of `present`, rather than trusting the app's own stale copy.
 fixed checkpoints (0.1 at render start, 0.9 after render, 1.0 after encode),
 not continuously (`OfflineAudioContext.render()` exposes no progress events).
 A percentage sat visibly unmoving for the whole export, which read as a hang
-rather than a working busy-state — tried once, reverted. `ExportButton.tsx`
-just shows "Exporting…"/disabled, no number.
+rather than a working busy-state — tried once, reverted. The Export button
+(inline in `components/layout/TopBar.tsx`, no dedicated `ExportButton.tsx`
+component despite what an earlier pass of this file claimed — correcting
+that here) just shows "Exporting…"/disabled, no number.
 
 **Files**: `utils/audibleTracks.ts` (solo/mute rule above),
 `hooks/useProjectExport.ts` (thin wrapper: filters via `audibleIndices`,
-builds a `podcast-export-<timestamp>.wav` filename, calls `exportWav`),
-`components/transport/ExportButton.tsx`, wired through
-`EditorShell.tsx`/`TransportControls.tsx` the same way `playPendingRef`/
+builds a `podcast-export-<timestamp>.wav`/`...-<format>kbps.<ext>` filename,
+calls `exportWav`), the Export `MenuButton` in `components/layout/TopBar.tsx`,
+wired through `EditorShell.tsx` the same way `playPendingRef`/
 `activeTrackIdRef` already are. `EditorShell.tsx`'s existing rebuild-guard
 div (disables the transport bar while `!isReady`) now also gates on
 `isExporting` — an offline render temporarily swaps Tone's global context
@@ -903,10 +907,142 @@ real-browser pass (mute, solo, solo+mute, fade, busy-state, console-error
 check) with a headless-Chromium script — all matched expectations, zero
 console errors.
 
-Not built (disclosed): MP3/other formats (WAV only — all the library
-supports), per-track export (`exportWav`'s `mode: 'individual'` exists and
-works, just not wired to any UI yet), 32-bit float output (`bitDepth` option
-exists, defaulted to 16-bit).
+Not built (disclosed): per-track export (`exportWav`'s `mode: 'individual'`
+exists and works, just not wired to any UI yet), 32-bit float output
+(`bitDepth` option exists, defaulted to 16-bit).
+
+### Compressed export (MP3/AAC) (done)
+
+WAV's uncompressed PCM made exports much larger than users expected relative
+to the (compressed) source files — a 5.7MB pair of source clips exported to
+~113MB of WAV, which read as a bug report but is just what raw 16-bit PCM at
+the live context's sample rate costs (roughly 15-20x a typical speech
+bitrate). Rather than shrinking WAV itself, added real compressed
+alternatives: the Export button (formerly a single-click WAV download) is now
+a dropdown (`MenuButton`, same shape as "+ Clip") listing WAV first, then
+MP3 · 64/128/160 kbps, then AAC · 128 kbps. Opus and FLAC were considered and
+deliberately deferred to a later pass — the format list is a fixed array
+(`utils/exportFormats.ts`'s `EXPORT_FORMAT_ORDER`), easy to extend once
+wanted.
+
+**Architecture — no duplicate mixdown.** Compressed formats reuse the exact
+same render `useExportWav` already produces for WAV: `useProjectExport.ts`
+calls `exportWav(audibleTracks, audibleStates, { ..., autoDownload: false })`
+to get back `ExportResult.audioBuffer` (skipping the library's own WAV
+download), then `utils/exportFormats.ts`'s `encodeCompressed()` re-encodes
+that buffer via `mediabunny` — the identical `AudioBufferSource` → `Output` →
+`BufferTarget` pattern `utils/audioCompression.ts`'s Opus encoder already
+uses for the transcription pipeline, just pointed at `Mp3OutputFormat`/
+`Mp4OutputFormat` and export-quality stereo bitrates instead of that file's
+mono/16kHz/24kbps speech-to-text constants — the two encoders share a
+library, not any constants or state. WAV's own render/download path is
+otherwise untouched.
+
+**Real finding, confirmed live, not assumed from docs**: MP3 encoding is
+*not* guaranteed to be available via a browser's WebCodecs `AudioEncoder` the
+way Opus/AAC broadly are — `mediabunny` supports MP3 as a container/codec
+(`Mp3OutputFormat`, and its bitrate-snapping table already includes 64k/128k/
+160k) but doesn't bundle a software fallback encoder for it. Confirmed
+directly against this project's own Playwright Chromium build: MP3 encoding
+was **not** supported there natively (AAC was) — not a hypothetical, the
+actual result in the browser used to build and test this. Still worth
+knowing even though the gap below closes it: `hooks/useExportFormatSupport.ts`
+feature-detects every format via `mediabunny`'s `canEncodeAudio()` (optimistic
+default of "supported" so the menu doesn't flash disabled while the check
+runs) and the Export menu greys out + tooltips whatever comes back
+unsupported, rather than letting a user pick a format that fails at encode
+time — this stays in place as defense-in-depth even after the fix below,
+since a WASM/Worker load can still fail in a sufficiently locked-down
+environment (strict CSP, an ancient browser with no WebAssembly at all).
+
+**MP3 is now guaranteed regardless of native browser support**, via
+`@mediabunny/mp3-encoder` — an official first-party mediabunny extension
+(same maintainers/repo, confirmed peer-compatible via `npm view` against this
+project's installed `mediabunny` version before adding it), not a third-party
+guess. It registers a `CustomAudioEncoder` wrapping a WASM build of LAME
+3.100 running in a Web Worker. The mechanism that makes this a clean,
+non-invasive fix: `canEncodeAudio()` checks registered custom encoders
+*before* falling back to the native check (confirmed by reading
+`encode.js`), so once the polyfill is registered, every existing call site
+(`canEncodeFormat`, `encodeCompressed`) starts working unmodified — nothing
+about the actual encode path changed, only whether a codec is available at
+all. `utils/exportFormats.ts`'s `ensureMp3EncoderReady()` checks native
+support first (free, no extra download when a browser already has one) and
+only dynamically imports/registers the polyfill when it doesn't; module-level
+cached promise so registration only ever runs once per page load.
+`useExportFormatSupport` awaits it before running the per-format
+`canEncodeFormat` checks. **Verified, not just measured against the
+vendor's own claim**: after wiring this in, the MP3 menu item flipped from
+disabled to enabled in this project's same Playwright Chromium build that
+previously lacked native MP3 support — direct proof the polyfill closes the
+exact gap it was built for. Performance measured against a real 5-minute
+synthetic clip (not just the tiny clips the committed suite uses): full
+export (render + encode + download) took ~10.2s end-to-end, output 4.58MB —
+exactly the expected size at 128kbps (128,000 bits/s × 300s ÷ 8), confirming
+correctness alongside timing. Extrapolated linearly, a real 3-hour podcast
+lands around ~2 minutes — comfortably within the existing "Exporting…"
+spinner's tolerance, no progress-bar need reopened by this. `e2e/export.spec.ts`'s
+compressed-format test still picks whichever of MP3-128/AAC-128 is enabled at
+runtime rather than hard-coding MP3 — now effectively always MP3 given the
+polyfill, but kept format-agnostic on purpose: the disabled-fallback path is
+still real defense-in-depth, not dead code, so the test shouldn't assume it
+can never trigger.
+
+**Filename convention**: `podcast-export-<timestamp>-<format>kbps.<ext>`,
+e.g. `podcast-export-20260814-143000-mp3-128kbps.mp3`,
+`...-aac-128kbps.m4a` — WAV keeps its pre-existing plain
+`podcast-export-<timestamp>.wav` (no suffix), since it's the original default
+rather than a new addition.
+
+**`MenuButton` (`components/ui/MenuButton.tsx`) gained two small, generic
+capabilities** for this, not Export-specific ones: a per-action
+`disabled`/`title` pair (used for the unsupported-format tooltip above) and a
+`variant` passthrough to the underlying `Button` (Export was a `variant=
+"primary"` `Button` before gaining a dropdown; without this it would have
+silently downgraded to `MenuButton`'s previous hardcoded `"secondary"`, losing
+its visual weight as the one primary call-to-action in the top bar).
+
+**Files**: `utils/exportFormats.ts` (format catalog, `canEncodeFormat`,
+`ensureMp3EncoderReady`, `encodeCompressed`, `downloadBlob`),
+`hooks/useExportFormatSupport.ts` (feature-detection hook, now also drives
+the polyfill registration above), `hooks/useProjectExport.ts` (now
+format-aware — `isExporting` covers both the render *and* the
+compressed-encode step, via a separate local `isEncoding` state, so the
+editor-blocking overlay stays up continuously instead of flickering off
+between the two), `components/ui/MenuButton.tsx` (the two capabilities
+above), `components/layout/TopBar.tsx` (Export is now built from
+`EXPORT_FORMAT_ORDER` instead of a single button).
+
+Committed coverage: `e2e/export.spec.ts` gained a test asserting all 5 menu
+items are present, a dedicated test asserting the MP3 menu item is
+specifically enabled (not just "some compressed format is," which the
+format-agnostic test below already covered but which would keep passing
+silently if the polyfill mechanism itself broke — see the self-review fix
+below), and a format-agnostic compressed-export size/filename test;
+`e2e/silenceRemoval.spec.ts`'s own WAV-download test updated for the new
+"open dropdown, then click WAV" shape. Full suite (145 tests) passed against
+a fresh prod build.
+
+**Two fixes from a pre-commit self-review**, not found by any test — asked
+to critically re-read the implementation before committing: `ensureMp3EncoderReady`
+originally cached a *rejected* promise forever on failure (a transient
+network blip loading the dynamic import's chunk, or the Worker failing to
+spawn, would have permanently disabled MP3 for the rest of the page session
+with no way to recover short of a reload) — fixed by clearing the cache in a
+`.catch()` before rethrowing, so a later call (a user simply retrying) gets a
+fresh attempt. And the MP3-specific regression test above didn't exist yet —
+the original compressed-format test was deliberately format-agnostic (a
+deliberate, correct design for a genuinely environment-dependent capability),
+but that same property meant it would have silently kept passing, by falling
+through to testing AAC instead, even if the polyfill registration path
+broke entirely. Both fixed in the same pass; noted here rather than treated
+as if they'd always been right, since the whole point of this file is not
+hiding what actually happened.
+
+Not built (disclosed): Opus/FLAC (deferred, see above — the format list is
+easy to extend), a UI affordance explaining *why* a greyed-out format is
+disabled beyond the native tooltip, remembering the user's last-picked format
+across sessions.
 
 ## Text-to-Speech (Cartesia) (done)
 
@@ -1450,6 +1586,14 @@ worth remembering specifically because it recurred here.
   — see "Transcription pipeline + Audio search" above for why it was chosen
   over `opus-recorder`). A genuinely new install, not a transitive one
   already resolved like `@waveform-playlist/core` was.
+- **`@mediabunny/mp3-encoder` is a direct dependency**, added so MP3 export
+  works regardless of native browser support — see "Compressed export
+  (MP3/AAC)" above. Official first-party mediabunny extension package, not a
+  third-party pick; peer-compatible with this project's installed
+  `mediabunny` version (`^1.0.0` required, `1.53.0` installed — confirmed via
+  `npm view` before adding it, not assumed from a search result). Lazily
+  imported (`utils/exportFormats.ts`'s `ensureMp3EncoderReady`), so a browser
+  with native MP3 support never pays its ~130KB gzipped cost at all.
 
 ## Library findings worth remembering
 
