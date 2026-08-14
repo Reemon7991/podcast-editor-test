@@ -3,12 +3,16 @@
 import { useCallback, useRef, useState } from "react";
 import * as Tone from "tone";
 import type { AudioClip } from "@waveform-playlist/browser";
-import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
-import { saveAsset } from "../utils/persistence";
+import { getAssetId, hashFileBytes, registerAsset } from "../utils/assetRegistry";
+import { saveAsset, saveCompressedAsset, saveTranscript } from "../utils/persistence";
 import { spliceOutSilence } from "../utils/silenceDetection";
 import { encodeWavPcm16 } from "../utils/wavEncode";
-import type { ClipMeta } from "../utils/types";
+import { remapWordsThroughKeptRanges } from "../utils/transcriptRemap";
+import { compressAssetToChunks } from "../utils/audioCompression";
+import { runTranscriptionPipeline } from "../utils/transcription";
+import type { AssetTranscript, ClipMeta } from "../utils/types";
 import { useProjectStore } from "../store/projectStore";
+import { useTranscriptStore } from "../store/transcriptStore";
 import type { ToastMessage } from "../components/ui/Toast";
 
 /**
@@ -84,6 +88,56 @@ export function useRemoveSilence() {
             "This clip's silence was removed, but couldn't be saved for offline use — it will be lost if you reload before exporting."
           );
         });
+
+        // The splice mints a brand-new content-hash assetId with no
+        // transcript of its own yet — see
+        // TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 4. If the
+        // source clip's own asset already has a finished transcript, remap
+        // it through the exact kept ranges this splice just used — no
+        // network call, keeps this operation's existing "fully client-side"
+        // property intact. Otherwise (source transcript still transcribing,
+        // failed, or predates this feature) there's nothing to remap from,
+        // so fall back to the same compress+transcribe pipeline a fresh
+        // upload goes through, kicked off in the background exactly like a
+        // normal upload's transcription — this operation's own toast/overlay
+        // already cover the splice itself; this is a secondary, invisible
+        // follow-up.
+        // `clip` here is the hydrated AudioClip (has audioBuffer, not
+        // assetId — that's a ClipMeta-only field, see utils/types.ts).
+        // getAssetId resolves back via the same buffer-object-reference
+        // binding registerAsset established at upload/hydration time.
+        const sourceAssetId = getAssetId(clip.audioBuffer);
+        const sourceTranscript = sourceAssetId
+          ? useTranscriptStore.getState().transcripts[sourceAssetId]
+          : undefined;
+        if (sourceTranscript?.status === "done" && sourceTranscript.words) {
+          const remappedWords = remapWordsThroughKeptRanges(
+            sourceTranscript.words,
+            clip.offsetSamples,
+            clip.durationSamples,
+            clip.sampleRate,
+            result.keepRanges
+          );
+          const newTranscript: AssetTranscript = {
+            assetId,
+            status: "done",
+            words: remappedWords,
+            updatedAt: Date.now(),
+          };
+          useTranscriptStore.getState().setTranscript(newTranscript);
+          saveTranscript(newTranscript).catch((err) => {
+            console.error("[podcast-editor] Failed to persist remapped transcript", err);
+          });
+        } else {
+          compressAssetToChunks(audioContext, result.buffer)
+            .then(async (chunks) => {
+              await saveCompressedAsset(assetId, chunks);
+              void runTranscriptionPipeline(assetId, chunks, result.buffer.sampleRate);
+            })
+            .catch((err) => {
+              console.error("[podcast-editor] Failed to compress silence-trimmed clip for transcription", err);
+            });
+        }
 
         const newClip: ClipMeta = {
           id: crypto.randomUUID(),

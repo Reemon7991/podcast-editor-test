@@ -199,7 +199,20 @@ export function detectKeepRanges(
 export type SpliceOutSilenceResult =
   | { type: "unchanged" }
   | { type: "all-silence" }
-  | { type: "trimmed"; buffer: AudioBuffer; leadingEdgeKept: boolean; trailingEdgeKept: boolean };
+  | {
+      type: "trimmed";
+      buffer: AudioBuffer;
+      leadingEdgeKept: boolean;
+      trailingEdgeKept: boolean;
+      /** The exact kept ranges used for the splice (sample offsets relative
+       *  to the clip's own start, i.e. 0 = offsetSamples — see KeepRange's
+       *  own doc comment), in the same ascending/non-overlapping order the
+       *  splice itself consumed them in. Added for
+       *  TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 4 — lets a caller
+       *  remap the source clip's transcript through the same cuts
+       *  (utils/transcriptRemap.ts) without re-deriving them. */
+      keepRanges: KeepRange[];
+    };
 
 /**
  * Detects silence in `sourceBuffer`'s [offsetSamples, offsetSamples +
@@ -241,5 +254,6 @@ export function spliceOutSilence(
     buffer,
     leadingEdgeKept: keepRanges[0].startSample === 0,
     trailingEdgeKept: keepRanges[keepRanges.length - 1].endSample === durationSamples,
+    keepRanges,
   };
 }

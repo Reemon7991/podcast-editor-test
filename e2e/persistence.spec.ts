@@ -1,33 +1,9 @@
 import { test, expect } from "@playwright/test";
 import { makeSineWavFile } from "./fixtures";
-import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor } from "./helpers";
+import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, countIndexedDbRecords } from "./helpers";
 
 const REMOVE_TRACK = { name: "Remove track" } as const;
 const MUTE = { name: "Mute", exact: true } as const;
-
-/**
- * Reads the `assets` object store's record count directly via the browser's
- * native indexedDB API — the DB/stores already exist by this point (any
- * earlier `loadProject()` call, which every page load makes via
- * useProjectHydration.ts, opens/creates them via the `upgrade` callback in
- * utils/persistence.ts even when nothing has been saved yet).
- */
-async function countAssetRecords(page: import("@playwright/test").Page): Promise<number> {
-  return page.evaluate(() => {
-    return new Promise<number>((resolve, reject) => {
-      const req = indexedDB.open("editor-pro", 1);
-      req.onsuccess = () => {
-        const db = req.result;
-        const tx = db.transaction("assets", "readonly");
-        const countReq = tx.objectStore("assets").count();
-        countReq.onsuccess = () => resolve(countReq.result);
-        countReq.onerror = () => reject(countReq.error);
-        tx.oncomplete = () => db.close();
-      };
-      req.onerror = () => reject(req.error);
-    });
-  });
-}
 
 /**
  * Phase 3 (see PERSISTENCE_UNDO_ORIGINAL_PLAN.md) — IndexedDB persistence and
@@ -130,7 +106,7 @@ test.describe("Phase 3 persistence", () => {
       await page.goto("/__e2e_seed__");
       await page.evaluate(() => {
         return new Promise<void>((resolve, reject) => {
-          const req = indexedDB.open("editor-pro", 1);
+          const req = indexedDB.open("editor-pro");
           req.onsuccess = () => {
             const db = req.result;
             const tx = db.transaction("project", "readwrite");
@@ -170,7 +146,7 @@ test.describe("Phase 3 persistence", () => {
 
     await page.waitForTimeout(800); // let the debounced save land
 
-    expect(await countAssetRecords(page)).toBe(1);
+    expect(await countIndexedDbRecords(page, "assets")).toBe(1);
 
     await page.reload();
     await waitForWaveformReady(page);

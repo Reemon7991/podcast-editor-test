@@ -1,9 +1,11 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { TrackMeta } from "./types";
+import type { AssetTranscript, CompressedChunk, TrackMeta } from "./types";
 
 /**
- * IndexedDB persistence — the only two stores this app needs. See
- * PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 3 for the full design.
+ * IndexedDB persistence. See PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 3 for
+ * the original two-store design (`project`/`assets`); see
+ * TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 1 for the two stores
+ * added on top of that (`compressedAssets`/`transcripts`).
  *
  * `project` holds a single fixed-key record: the current `present` snapshot
  * only, never `past`/`future` — undo history doesn't need to survive a
@@ -16,12 +18,20 @@ import type { TrackMeta } from "./types";
  * key is a content hash, writing the same file's bytes twice is an
  * idempotent overwrite of the same record, not a duplicate — cross-upload
  * dedup falls out of the key itself, no extra logic needed here.
+ *
+ * `compressedAssets` holds the Opus-encoded, duration-bounded chunks each
+ * asset gets split into for transcription (see utils/audioCompression.ts) —
+ * one record per assetId, holding every chunk for that asset. `transcripts`
+ * holds one `AssetTranscript` per assetId (status + word-level timestamps,
+ * asset-relative — see utils/types.ts's own doc comment on why).
  */
 
 const DB_NAME = "editor-pro";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const PROJECT_STORE = "project";
 const ASSETS_STORE = "assets";
+const COMPRESSED_ASSETS_STORE = "compressedAssets";
+const TRANSCRIPTS_STORE = "transcripts";
 const PROJECT_KEY = "current";
 
 interface ProjectRecord {
@@ -36,6 +46,11 @@ interface AssetRecord {
   addedAt: number;
 }
 
+interface CompressedAssetRecord {
+  chunks: CompressedChunk[];
+  addedAt: number;
+}
+
 interface EditorProDB extends DBSchema {
   [PROJECT_STORE]: {
     key: string;
@@ -44,6 +59,14 @@ interface EditorProDB extends DBSchema {
   [ASSETS_STORE]: {
     key: string;
     value: AssetRecord;
+  };
+  [COMPRESSED_ASSETS_STORE]: {
+    key: string;
+    value: CompressedAssetRecord;
+  };
+  [TRANSCRIPTS_STORE]: {
+    key: string;
+    value: AssetTranscript;
   };
 }
 
@@ -58,9 +81,19 @@ let dbPromise: Promise<IDBPDatabase<EditorProDB>> | null = null;
 function getDb(): Promise<IDBPDatabase<EditorProDB>> {
   if (!dbPromise) {
     dbPromise = openDB<EditorProDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore(PROJECT_STORE);
-        db.createObjectStore(ASSETS_STORE);
+      // Guarded on oldVersion so an existing v1 database (project/assets
+      // already populated) only gains the two new stores rather than being
+      // recreated — idb's upgrade callback fires with the DB's actual prior
+      // version, 0 for a genuinely fresh database.
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore(PROJECT_STORE);
+          db.createObjectStore(ASSETS_STORE);
+        }
+        if (oldVersion < 2) {
+          db.createObjectStore(COMPRESSED_ASSETS_STORE);
+          db.createObjectStore(TRANSCRIPTS_STORE);
+        }
       },
     });
   }
@@ -110,6 +143,48 @@ export async function loadAssets(assetIds: string[]): Promise<Map<string, Blob>>
   const result = new Map<string, Blob>();
   for (const [assetId, blob] of entries) {
     if (blob) result.set(assetId, blob);
+  }
+  return result;
+}
+
+/** Same idempotent-overwrite-by-content-hash property as saveAsset — an
+ *  assetId's compressed chunks never change once computed (the source
+ *  bytes they're derived from are the same content-addressed asset), so a
+ *  repeat write is always a no-op in practice, not a real overwrite. */
+export async function saveCompressedAsset(assetId: string, chunks: CompressedChunk[]): Promise<void> {
+  const db = await getDb();
+  await db.put(COMPRESSED_ASSETS_STORE, { chunks, addedAt: Date.now() }, assetId);
+}
+
+export async function loadCompressedAsset(assetId: string): Promise<CompressedChunk[] | undefined> {
+  const db = await getDb();
+  const record = await db.get(COMPRESSED_ASSETS_STORE, assetId);
+  return record?.chunks;
+}
+
+export async function saveTranscript(transcript: AssetTranscript): Promise<void> {
+  const db = await getDb();
+  await db.put(TRANSCRIPTS_STORE, transcript, transcript.assetId);
+}
+
+export async function loadTranscript(assetId: string): Promise<AssetTranscript | undefined> {
+  const db = await getDb();
+  return db.get(TRANSCRIPTS_STORE, assetId);
+}
+
+/** Batched parallel read, same shape as loadAssets — used by
+ *  useProjectHydration.ts to repopulate transcriptStore.ts on reload. */
+export async function loadTranscripts(assetIds: string[]): Promise<Map<string, AssetTranscript>> {
+  const db = await getDb();
+  const entries = await Promise.all(
+    assetIds.map(async (assetId): Promise<[string, AssetTranscript | undefined]> => {
+      const record = await db.get(TRANSCRIPTS_STORE, assetId);
+      return [assetId, record];
+    })
+  );
+  const result = new Map<string, AssetTranscript>();
+  for (const [assetId, transcript] of entries) {
+    if (transcript) result.set(assetId, transcript);
   }
   return result;
 }

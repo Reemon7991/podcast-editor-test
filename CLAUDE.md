@@ -11,14 +11,21 @@ code). **The project has since moved into production-hardening**: real bugs
 found via reading app and library sources directly, fixed, and verified
 end-to-end via Playwright against production builds — not just probing the
 library's fit anymore. It is not yet shippable — see "Known limitations" for
-the concrete gaps still open. Persistence, undo/redo, fade in/out, export, and
-now the first AI feature (text-to-speech) are all done now (see the
-persistence/undo-redo layer section, "Fade in/out", "Export", and
-"Text-to-Speech (Cartesia)" below), each with a committed test suite — but
-that coverage is still scoped to those layers, not the rest of the app.
-Every non-obvious decision below exists because of something concretely
-discovered while building this, not speculation — treat this file as the
-fastest way to avoid re-deriving that work in a future session.
+the concrete gaps still open. Persistence, undo/redo, fade in/out, export,
+text-to-speech, and silence removal are all done (see the persistence/
+undo-redo layer section, "Fade in/out", "Export", "Text-to-Speech (Cartesia)",
+and "Silence removal" below), each with a committed test suite. On top of
+those, a **word-level transcription pipeline (Whisper via OpenRouter) and
+audio search are now also done** (see "Transcription pipeline + Audio search"
+below) — verified live against a real production build at every phase, but
+**not yet covered by a committed Playwright suite** (ad-hoc scratchpad
+verification only, same discipline the rest of this file used before the
+persistence/undo-redo layer's suite existed — see "Verification approach").
+**Filler-word removal — the other feature this transcription pipeline was
+built for — has not been started yet.** Every non-obvious decision below
+exists because of something concretely discovered while building this, not
+speculation — treat this file as the fastest way to avoid re-deriving that
+work in a future session.
 
 ## Current feature state
 
@@ -77,21 +84,32 @@ those two; the AI features are the most speculative and probably last).
 5. **Audio effects** — per-clip or per-track processing (EQ, compression,
    gain automation, etc. — scope not yet defined).
 6. **AI features** — text-to-speech, noise removal, humming removal, silence
-   removal. Scope, model/service choice, and where the compute runs are
-   mostly open per-feature (not a blanket "needs a server" — see below),
-   except for TTS: **done** (Cartesia, backend-owned request via
-   a Next.js Route Handler, triggered from a "+ Clip" toolbar dropdown,
-   inserted at the playhead through the existing upload clip-insertion
-   pipeline) — see "Text-to-Speech (Cartesia)" below for the actual
-   implementation and the real bugs found building it; `TTS_CARTESIA_PLAN.md`
-   is the original design doc, kept corrected (not left stale) against what
-   actually shipped. Silence removal: **done** (energy/RMS-based, fully
-   client-side — no server round trip needed for this one, unlike the
-   blanket note above originally assumed) — see "Silence removal" below for
-   the actual implementation and the real bugs found building and then
-   actually using it; `SILENCE_REMOVAL_PLAN.md` is the original design doc,
-   kept corrected against what actually shipped, same discipline as
-   `TTS_CARTESIA_PLAN.md`. Noise/humming removal remain fully open.
+   removal, transcription/search, filler-word removal. Scope, model/service
+   choice, and where the compute runs are mostly open per-feature (not a
+   blanket "needs a server" — see below), except for TTS: **done** (Cartesia,
+   backend-owned request via a Next.js Route Handler, triggered from a
+   "+ Clip" toolbar dropdown, inserted at the playhead through the existing
+   upload clip-insertion pipeline) — see "Text-to-Speech (Cartesia)" below for
+   the actual implementation and the real bugs found building it;
+   `TTS_CARTESIA_PLAN.md` is the original design doc, kept corrected (not left
+   stale) against what actually shipped. Silence removal: **done**
+   (energy/RMS-based, fully client-side — no server round trip needed for
+   this one, unlike the blanket note above originally assumed) — see
+   "Silence removal" below for the actual implementation and the real bugs
+   found building and then actually using it; `SILENCE_REMOVAL_PLAN.md` is
+   the original design doc, kept corrected against what actually shipped,
+   same discipline as `TTS_CARTESIA_PLAN.md`. Word-level transcription
+   (Whisper via OpenRouter, backend-owned like TTS) and audio search built on
+   top of it: **done** — see "Transcription pipeline + Audio search" below;
+   `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md` is the original design doc for
+   both this and the still-open item below, same "kept corrected" discipline.
+   **Filler-word removal is the one AI feature still not started** — the
+   transcription pipeline it depends on is done and its own plan doc already
+   spells out the intended design (per-clip menu item, disabled until that
+   clip's transcript is ready, a review-then-apply modal rather than
+   silence-removal's blind auto-apply — deliberately, since word-dictionary
+   matching has real false positives RMS-based silence detection never had).
+   Noise/humming removal remain fully open, no design work done.
 
 ## Architecture
 
@@ -1218,6 +1236,175 @@ repeatedly against a fresh prod build, plus a manual pass against a real
 10-minute synthetic recording measuring the actual UI-response timing (see
 bug 8) — not just the small clips the committed suite uses.
 
+## Transcription pipeline + Audio search (done)
+
+Word-level transcription (Whisper via OpenRouter) for every uploaded/
+generated clip, feeding a "Search in the podcast" popover. Full design:
+`TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md`, kept corrected against what
+actually shipped, same discipline as `SILENCE_REMOVAL_PLAN.md`/
+`TTS_CARTESIA_PLAN.md`. Filler-word removal — the other feature this
+pipeline was built for — is not started; see that plan doc's Phase 6 for the
+intended design.
+
+**The one finding that shapes the whole design**: `ClipMeta`/`AudioClip`
+already carries everything needed to make a transcript survive move/trim/
+split for free — `assetId` (which source asset), `offsetSamples` (where a
+clip starts inside that asset), `durationSamples` (how much of the asset it
+uses), `startSample` (where it sits on the timeline). Storing one transcript
+per `assetId`, in seconds relative to that asset's own start (never per-clip,
+never timeline-relative), means a move (only changes `startSample`) or a trim
+(only changes `offsetSamples`/`durationSamples`) needs zero new invalidation
+logic. Split also preserves it (confirmed via `assetRegistry.ts`'s
+`getAssetId` — the library passes the same buffer by reference to both
+halves). Only a **splice** (silence removal, and filler-word removal once
+built) breaks this, since it mints a new content-hash `assetId` — see the
+remap step below.
+
+**Files**: `src/utils/audioCompression.ts` (chunk-then-Opus-encode, via
+`mediabunny`), `src/utils/concurrency.ts` (`settleWithConcurrencyLimit` —
+generic, Node-unit tested `Promise.allSettled`-with-a-cap helper; see below),
+`src/utils/transcription.ts` (`runTranscriptionPipeline` —
+plain function, not a hook, called from both the upload and TTS paths),
+`src/app/api/transcribe/route.ts` (holds `OPENROUTER_API_KEY`, mirrors
+`api/tts/route.ts`'s retry-on-429/5xx-never-4xx shape exactly), `src/utils/
+transcriptWindow.ts` (`wordsInWindow` — the one "which words are audible in
+this clip" filter, shared by search and the remap below so the rule can't
+drift), `src/utils/transcriptRemap.ts` (`remapWordsThroughKeptRanges` — see
+below), `src/utils/transcriptSearch.ts` (pure phrase-search logic) +
+`src/hooks/useTranscriptIndex.ts` (the reactive wrapper), `src/components/
+search/SearchButton.tsx` (the whole search UI — self-contained trigger +
+popover, modeled on `ui/MenuButton.tsx`'s positioning/dismiss mechanics).
+`src/store/transcriptStore.ts` is a **new, separate** Zustand store (`assetId
+-> AssetTranscript`) — deliberately never wired into `projectStore.ts` or
+read above/inside `TimelineStage.tsx`, to avoid a second instance of the
+`processingClipId` bug documented in "Silence removal" below (any state that
+changes independently of a real `commit()`, if visible above `TimelineStage`,
+defeats its passthrough-cache and forces spurious full engine rebuilds — this
+store's status changes constantly and asynchronously, exactly that class of
+state). `src/utils/persistence.ts` gained two IndexedDB stores
+(`compressedAssets`, `transcripts`; `DB_VERSION` bumped to 2, `upgrade()`
+guarded on `oldVersion` so an existing v1 database isn't recreated).
+`useProjectHydration.ts` now also batch-loads transcripts on mount and
+re-kicks any left `"pending"`/`"transcribing"` from a tab closed mid-flight
+(cheap — reuses the already-persisted compressed chunks, no re-decode/
+re-compress).
+
+**Compression: chunk-first, then Opus-encode each chunk** — not one
+whole-asset compressed file. OpenRouter's transcription endpoint has both a
+25MB size cap AND a ~60s upstream processing timeout independent of size (a
+tiny-but-long Opus file can still time out); chunking by duration (~10
+min/chunk) solves both at once, and a chunk is reused as-is for its own
+transcription request body with no second encode pass. `mediabunny` (not
+`opus-recorder`, tried first and rejected — confirmed via its own README
+it's built exclusively around live `MediaStream` capture, with no way to
+feed it an already-decoded buffer without literally replaying it in real
+time) does the actual encode: `AudioBufferSource` takes a real `AudioBuffer`
+directly, `OggOutputFormat` + `BufferTarget` produce a self-contained file in
+memory. **Requires a secure context** (`AudioEncoder` is `undefined`
+otherwise) — a non-issue for this app (always `localhost` or real HTTPS), but
+`playwright-core`'s default headless launch (`chromium_headless_shell`) has
+no `AudioEncoder` at all, unrelated to secure-context — any Playwright
+verification of this feature (manual scratchpad script or a future committed
+e2e spec) must launch the full Chromium binary (`chrome-win64/chrome.exe`
+under the cached revision folder), not rely on the default headless config,
+or it fails for a reason that has nothing to do with the app. Real measured
+number: a ~5s real-speech clip compressed from 418KB (WAV) to 13KB
+(mono/16kHz Opus, 24kbps) — ~97% smaller.
+
+**OpenRouter request/response, confirmed live** (not trusted from docs alone
+— same discipline as Cartesia's voice-list finding below): `POST https://
+openrouter.ai/api/v1/audio/transcriptions`, `model: "openai/whisper-large-v3"`,
+`response_format: "verbose_json"`, `timestamp_granularities: ["word"]`,
+multipart `file`. Response: `{ text, usage: {seconds, cost}, language,
+duration, words: [{ word, start, end }] }` — the field is `word`, not `text`
+as an earlier docs pass assumed. Word-level timestamps confirmed accurate
+against a known phrase, both on a raw WAV and on the actual compressed Opus
+file this pipeline produces.
+
+**Chunk requests are concurrency-capped at 3, and the merge across chunks is
+verified live, not just reasoned about** — both added in a post-Phase-5
+self-review. A long asset (18 chunks for a 3-hour podcast at the default
+10-min chunk size) firing every chunk at OpenRouter simultaneously is a real
+way to trigger rate limiting; `transcription.ts` now runs chunk requests
+through `concurrency.ts`'s cap instead of a bare `Promise.allSettled`. The
+original Phase 0-3 pass never actually exercised >1 chunk (every test clip
+produced exactly one) — closed by temporarily lowering
+`CHUNK_DURATION_SECONDS` to 8s and uploading a real ~12.6s clip with 3
+chapter-marker checkpoints spanning the boundary: exactly 2 requests fired,
+36 words merged in correct order, and the marker spoken *after* the boundary
+landed at 9.5s, not reset near 0 — confirming the chunk-offset math. Constant
+reverted afterward; a full rebuild confirmed unchanged default behavior.
+
+**Re-transcription for spliced assets (silence removal today; filler-word
+removal will hit the same path once built): remap, not re-transcribe.**
+`silenceDetection.ts`'s `spliceOutSilence` now also returns `keepRanges`;
+`useRemoveSilence.ts` remaps the source clip's transcript through them
+locally (`transcriptRemap.ts`) with zero network call whenever the source had
+a finished transcript to remap from — keeps silence removal's existing
+"fully client-side, no server round trip" property intact. Falls back to a
+real `runTranscriptionPipeline` call only if the source transcript wasn't
+ready. **Verified live**: a synthetic clip built from two real
+Cartesia-synthesized phrases separated by a genuine 3s silence gap — all 16
+transcribed words survived except the ones actually inside the removed gap
+(correctly dropped, including one that straddled a cut boundary), the new
+asset's transcript appeared **~7ms** after the splice committed (vs.
+500ms-2s+ for every observed real OpenRouter call — unambiguous proof the
+local remap ran, not the network fallback), and the first word after the gap
+shifted by ~2.78s — matching the ~3s gap minus the padding silence removal
+keeps on each cut's edges.
+
+**Search UX, per direct user spec** (not the original plan sketch's
+TopBar-owned-state assumption): `SearchButton.tsx` owns its own
+`query`/`submittedQuery`/results state directly — it never unmounts (lives in
+`TopBar.tsx`, which survives every engine rebuild), so closing the popover
+only toggles visibility, satisfying "search and results persist until
+cleared" with no extra store. **Search runs on Enter, not on every
+keystroke** (changed after initial live-search felt noisy) — editing the
+query afterward without pressing Enter again leaves the last results
+showing, doesn't blank them. Transcription status is invisible to the
+searching user by design: if any clip's transcript is still catching up when
+Enter is pressed, the popover just shows the same generic "Searching…" state
+`useTranscriptIndex.ts`'s `isTranscribing` flag drives — never a
+transcription-specific message. Selecting a result calls
+`usePlaylistControls().seekTo()` with the match start minus a fixed 0.5s
+lead-in (clamped to 0) and reuses `EditorShell.tsx`'s existing
+`setSelectedClip`, threaded down through `TopBar.tsx` exactly like every
+other clip-mutation callback already is. Result-card timestamps use the
+**standalone** `formatTime` from `@waveform-playlist/ui-components`
+(`"hh:mm:ss"`, no decimals) — deliberately not `usePlaylistControls()
+.formatTime` (which drives current-time/total-duration elsewhere at their
+own, unrelated precision and would have been an app-wide format change).
+Matched text renders in a real `<mark>`, styled with the same
+`--accent-purple-100`/`-700` pair `ClipActionsOverlay.tsx`'s own clip-name
+labels already use, not a new color. `useTranscriptIndex.ts` is **per-clip
+memoized** via a module-level `clipCache` (added post-Phase-5 — the original
+version rescanned every clip's words on any single unrelated transcript
+update, since `transcriptStore`'s record is a new object reference on each
+one; same fix shape as `dehydrate()`'s own per-track cache below. Module-
+level, not `useRef` — this repo's `eslint-plugin-react-hooks` "refs" rule
+rejects reading `ref.current` during render even inside `useMemo`, same rule
+the Phase 1 notes above already document hitting once). **Verified live**: uploaded real speech
+("Welcome to the Elephant Sanctuary Podcast…"), searched "elephant" — 2
+correctly-matched results, selecting one flipped the toolbar's Duplicate
+button from disabled to enabled (selection confirmed) and moved
+`current-time` to exactly `match_start - 0.5s`; typing without pressing Enter
+produced zero results (confirming the old debounce-driven live search is
+really gone); closing and reopening the popover preserved the same query and
+results.
+
+**Not built / disclosed gaps**: no committed Playwright suite for any of
+this yet (every phase verified live via ad-hoc scratchpad Playwright
+scripts against real production builds and, where relevant, real Whisper/
+Cartesia calls — see "Verification approach" below); a `"failed"` transcript
+(every chunk failed) has no retry affordance beyond the reload-time re-kick;
+the filler-word dictionary/UI itself doesn't exist yet (see the "Planned
+features" bullet above and the plan doc's Phase 6); a stale `next dev`/`next
+start` process left running on port 3000 from an earlier session silently
+absorbed test traffic more than once while verifying this feature — same
+"confirm the shared dev server is actually alive before suspecting the code"
+gotcha this file's own "Verification approach" section already documents,
+worth remembering specifically because it recurred here.
+
 ## Critical setup gotchas (do not re-discover these)
 
 - **`styled-components` must be installed manually.** It's a hard runtime
@@ -1251,6 +1438,18 @@ bug 8) — not just the small clips the committed suite uses.
   "Silence removal" below). It was already resolved transitively via
   `browser`/`engine`/`ui-components` before this, so nothing new actually
   installs; only `package.json` gained a manifest entry.
+- **`OPENROUTER_API_KEY` must be set (server-only, never `NEXT_PUBLIC_*`) for
+  transcription (and therefore search) to work.** Read by `src/app/api/
+  transcribe/route.ts` from `process.env` — unset, the route returns a clean
+  500, same pattern `CARTESIA_API_KEY` above already established. Not
+  required for anything else — every other feature (including playback,
+  editing, export) works with it unset; a clip just never gets a transcript,
+  so it's silently excluded from search. Restart the server after setting it.
+- **`mediabunny` is a direct dependency**, added for the transcription
+  pipeline's compression step (Opus-encoding an already-decoded `AudioBuffer`
+  — see "Transcription pipeline + Audio search" above for why it was chosen
+  over `opus-recorder`). A genuinely new install, not a transitive one
+  already resolved like `@waveform-playlist/core` was.
 
 ## Library findings worth remembering
 

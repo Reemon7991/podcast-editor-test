@@ -3,9 +3,11 @@
 import { useCallback, useState } from "react";
 import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
-import { saveAsset } from "../utils/persistence";
+import { saveAsset, saveCompressedAsset } from "../utils/persistence";
 import { resolveNonOverlappingStart } from "../utils/clipGeometry";
 import { buildClipMeta } from "../utils/clipInsertion";
+import { compressAssetToChunks } from "../utils/audioCompression";
+import { runTranscriptionPipeline } from "../utils/transcription";
 import type { ClipMeta } from "../utils/types";
 import { createEmptyTrack, useProjectStore } from "../store/projectStore";
 
@@ -76,6 +78,7 @@ export function useTimelineTracks() {
       (async () => {
         const audioContext = Tone.getContext().rawContext as AudioContext;
         let assetSaveFailures = 0;
+        let compressionFailures = 0;
         const results = await Promise.allSettled(
           files.map(async (file): Promise<DecodedFile> => {
             const arrayBuffer = await file.arrayBuffer();
@@ -99,17 +102,51 @@ export function useTimelineTracks() {
               }),
             ]);
             registerAsset(audioBuffer, assetId);
+
+            // Compress (chunk + Opus-encode) and persist the compressed
+            // chunks — awaited, so the loading overlay this hook drives
+            // (isLoading, below) stays up until this finishes, per
+            // TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's UX requirement.
+            // Transcription itself is kicked off but NOT awaited — it
+            // continues in the background after the overlay clears and the
+            // user can already start editing. A compression failure is
+            // logged/counted and swallowed, same non-fatal treatment a
+            // saveAsset failure already gets above: the clip still works for
+            // editing/playback, it just won't be searchable and won't offer
+            // filler-word removal.
+            try {
+              const chunks = await compressAssetToChunks(audioContext, audioBuffer);
+              await saveCompressedAsset(assetId, chunks);
+              void runTranscriptionPipeline(assetId, chunks, audioBuffer.sampleRate);
+            } catch (err) {
+              console.error("[podcast-editor] Failed to compress asset for transcription", err);
+              compressionFailures += 1;
+            }
+
             return { file, audioBuffer, assetId };
           })
         );
 
+        // Both warnings are independent (a save failure doesn't imply a
+        // compression failure or vice versa) and combined rather than
+        // if/else'd — a batch where one file hits each shouldn't silently
+        // drop one of the two messages.
+        const warnings: string[] = [];
         if (assetSaveFailures > 0) {
-          setSaveWarning(
+          warnings.push(
             assetSaveFailures === 1
               ? "1 clip couldn't be saved for offline use — it will be lost if you reload before exporting."
               : `${assetSaveFailures} clips couldn't be saved for offline use — they will be lost if you reload before exporting.`
           );
         }
+        if (compressionFailures > 0) {
+          warnings.push(
+            compressionFailures === 1
+              ? "1 clip couldn't be prepared for transcription — it won't be searchable or offer filler-word removal."
+              : `${compressionFailures} clips couldn't be prepared for transcription — they won't be searchable or offer filler-word removal.`
+          );
+        }
+        if (warnings.length > 0) setSaveWarning(warnings.join(" "));
 
         commit(
           (prev) =>

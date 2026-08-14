@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import type { UploadFile } from "./fixtures";
+import type { AssetTranscript } from "../src/utils/types";
 
 /**
  * Reads this app's own fixed 44-byte-header 16-bit PCM WAV layout (matches
@@ -204,4 +205,84 @@ export async function rebuildsEngine(page: Page, action: () => Promise<void>): P
 
   const after = await page.evaluate(() => (window as unknown as RebuildProbeWindow).__rebuildCount);
   return after > before;
+}
+
+/**
+ * Generic record-count helper for any object store in the `editor-pro`
+ * IndexedDB database. No version argument to `open()` — a hardcoded one
+ * (this file used to have `indexedDB.open("editor-pro", 1)` inline in
+ * persistence.spec.ts) throws `VersionError` once `persistence.ts`'s own
+ * `DB_VERSION` moves past it, as it now has (see CLAUDE.md's "Transcription
+ * pipeline + Audio search").
+ */
+export async function countIndexedDbRecords(page: Page, storeName: string): Promise<number> {
+  return page.evaluate((name) => {
+    return new Promise<number>((resolve, reject) => {
+      const req = indexedDB.open("editor-pro");
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(name, "readonly");
+        const countReq = tx.objectStore(name).count();
+        countReq.onsuccess = () => resolve(countReq.result);
+        countReq.onerror = () => reject(countReq.error);
+        tx.oncomplete = () => db.close();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }, storeName);
+}
+
+/** Reads every record in the `transcripts` store — see
+ *  TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 1. */
+export async function readTranscripts(page: Page): Promise<AssetTranscript[]> {
+  return page.evaluate(() => {
+    return new Promise<AssetTranscript[]>((resolve, reject) => {
+      const req = indexedDB.open("editor-pro");
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction("transcripts", "readonly");
+        const getAllReq = tx.objectStore("transcripts").getAll();
+        getAllReq.onsuccess = () => resolve(getAllReq.result);
+        getAllReq.onerror = () => reject(getAllReq.error);
+        tx.oncomplete = () => db.close();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
+}
+
+/**
+ * Polls until at least one `transcripts` record reaches a settled status
+ * ("done" or "failed") or `timeoutMs` elapses. Transcription always runs in
+ * the background (see useTimelineTracks.ts's addFilesToTrack) — tests that
+ * need the finished result wait for this instead of a fixed delay.
+ */
+export async function waitForTranscriptSettled(page: Page, timeoutMs = 15000): Promise<AssetTranscript> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const settled = (await readTranscripts(page)).find((t) => t.status === "done" || t.status === "failed");
+    if (settled) return settled;
+    await page.waitForTimeout(150);
+  }
+  throw new Error(`No transcript settled within ${timeoutMs}ms`);
+}
+
+/**
+ * Mocks POST /api/transcribe at the browser level — same layer tts.spec.ts
+ * already mocks `**\/api/tts` at (see that file and ttsRoute.spec.ts's own
+ * doc comment on the split): real coverage of the client's reaction to a
+ * response, zero coverage of the route handler itself (that's
+ * transcribeRoute.spec.ts's job). Every clip in this suite is small enough
+ * to produce exactly one chunk, so one fixed response per request is
+ * equivalent to "each chunk gets its own" — the multi-chunk merge/offset
+ * path is covered directly in transcriptionPipeline.spec.ts (a Node-level
+ * test of `runTranscriptionPipeline` itself, not this browser-level mock).
+ */
+export async function mockTranscribeRoute(
+  page: Page,
+  words: { word: string; start: number; end: number }[]
+): Promise<void> {
+  await page.route("**/api/transcribe", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ words }) })
+  );
 }

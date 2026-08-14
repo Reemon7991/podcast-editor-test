@@ -3,9 +3,11 @@
 import { useCallback, useRef, useState } from "react";
 import * as Tone from "tone";
 import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
-import { saveAsset } from "../utils/persistence";
+import { saveAsset, saveCompressedAsset } from "../utils/persistence";
 import { resolveNonOverlappingStart } from "../utils/clipGeometry";
 import { buildClipMeta } from "../utils/clipInsertion";
+import { compressAssetToChunks } from "../utils/audioCompression";
+import { runTranscriptionPipeline } from "../utils/transcription";
 import { useProjectStore } from "../store/projectStore";
 
 const CLIP_NAME_MAX_LENGTH = 40;
@@ -91,6 +93,22 @@ export function useGenerateSpeech() {
         saveAsset(assetId, blob).catch((err) => {
           console.error("[podcast-editor] Failed to persist generated clip to IndexedDB", err);
         });
+
+        // Compress + persist compressed chunks, then kick off background
+        // transcription — same pipeline and same "generated audio needs
+        // transcription too" requirement as an uploaded file gets in
+        // useTimelineTracks.ts's addFilesToTrack. Awaited (blocks
+        // isGenerating until it finishes, per the UX requirement); the
+        // transcription call itself is not awaited. A failure here is
+        // logged and swallowed — the generated clip still works normally,
+        // it just won't be searchable or offer filler-word removal.
+        try {
+          const chunks = await compressAssetToChunks(audioContext, audioBuffer);
+          await saveCompressedAsset(assetId, chunks);
+          void runTranscriptionPipeline(assetId, chunks, audioBuffer.sampleRate);
+        } catch (err) {
+          console.error("[podcast-editor] Failed to compress generated clip for transcription", err);
+        }
 
         const name = clipNameFromText(text);
         commit(
