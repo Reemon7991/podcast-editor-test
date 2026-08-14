@@ -348,7 +348,6 @@ export function EditorShell({
   // synchronous savedScrollLeftRef update, for the same reason.
   usePlayheadPagingScroll({
     scrollContainerRef,
-    isPlaying,
     onPaged: (newScrollLeft) => {
       savedScrollLeftRef.current = newScrollLeft;
     },
