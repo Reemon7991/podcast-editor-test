@@ -42,22 +42,20 @@ test.describe("Search in the podcast", () => {
     await expect(page.getByPlaceholder(SEARCH_PLACEHOLDER)).toBeVisible();
   });
 
-  test("typing without pressing Enter does not search — no results, placeholder still shown", async ({ page }) => {
+  test("typing fewer than 3 characters does not search — no results, no message", async ({ page }) => {
     await gotoEditor(page);
     await mockTranscribeRoute(page, MOCK_WORDS);
     await uploadFiles(page, [makeSineWavFile("tone.wav", 2)]);
 
     await page.getByRole("button", SEARCH_BUTTON).click();
-    await page.getByPlaceholder(SEARCH_PLACEHOLDER).fill("fox");
-    // Generous wait — long enough that the old debounce-driven live search
-    // would have fired, if it were still there.
-    await page.waitForTimeout(600);
+    await page.getByPlaceholder(SEARCH_PLACEHOLDER).fill("fo");
 
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(0);
-    await expect(page.getByText("Type a word or phrase, then press Enter to search.")).toBeVisible();
+    await expect(page.getByText("Type a word or phrase to search.")).toBeHidden();
+    await expect(page.getByText(/No matches for/)).toBeHidden();
   });
 
-  test("pressing Enter searches and renders the match in context, clip name, and a decimal-free timestamp", async ({
+  test("typing 3 or more characters searches instantly, with no Enter press needed", async ({
     page,
   }) => {
     await gotoEditor(page);
@@ -67,7 +65,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("fox");
-    await input.press("Enter");
 
     const result = page.locator('[role="dialog"] ul li button').first();
     await expect(result).toBeVisible();
@@ -88,7 +85,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("fox");
-    await input.press("Enter");
     await page.locator('[role="dialog"] ul li button').first().click();
 
     // Selection: the clip toolbar (gated on a selected clip) enables.
@@ -110,7 +106,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("zzz_no_such_word");
-    await input.press("Enter");
 
     await expect(page.getByText(/No matches for/)).toBeVisible();
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(0);
@@ -124,7 +119,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("fox");
-    await input.press("Enter");
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(1);
 
     await page.keyboard.press("Escape");
@@ -157,7 +151,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("fox");
-    await input.press("Enter");
 
     const dialog = page.getByRole("dialog", SEARCH_DIALOG);
     await expect(dialog.getByText("Searching…")).toBeVisible();
@@ -178,7 +171,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("the");
-    await input.press("Enter");
 
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(MAX_SEARCH_RESULTS);
     await expect(
@@ -194,7 +186,6 @@ test.describe("Search in the podcast", () => {
     await page.getByRole("button", SEARCH_BUTTON).click();
     const input = page.getByPlaceholder(SEARCH_PLACEHOLDER);
     await input.fill("fox");
-    await input.press("Enter");
 
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(1);
     await expect(page.getByText(/Showing top/)).toHaveCount(0);

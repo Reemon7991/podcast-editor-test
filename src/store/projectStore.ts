@@ -95,9 +95,9 @@ function cloneTracks(tracks: TrackMeta[]): TrackMeta[] {
   return tracks.map((track) => ({ ...track }));
 }
 
-export function createEmptyTrack(index: number): TrackMeta {
+export function createEmptyTrack(index: number, id: string = crypto.randomUUID()): TrackMeta {
   return {
-    id: crypto.randomUUID(),
+    id,
     name: `Track ${index}`,
     clips: [],
     muted: false,

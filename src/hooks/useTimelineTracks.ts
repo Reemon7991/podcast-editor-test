@@ -43,8 +43,13 @@ export function useTimelineTracks() {
   // clip after their next reload.
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
 
+  // Mints the id upfront (rather than letting createEmptyTrack pick one)
+  // so the caller can select the new track right away, before the commit
+  // above has even landed — see EditorShell.tsx's "+ New Track" handler.
   const addTrack = useCallback(() => {
-    commit((prev) => [...prev, createEmptyTrack(prev.length + 1)], "Add track");
+    const id = crypto.randomUUID();
+    commit((prev) => [...prev, createEmptyTrack(prev.length + 1, id)], "Add track");
+    return id;
   }, [commit]);
 
   const removeTrack = useCallback(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { usePlaylistData, usePlaylistControls } from "@waveform-playlist/browser";
 import { formatTime } from "@waveform-playlist/ui-components";
@@ -44,6 +44,9 @@ const VIEWPORT_EDGE_INSET_PX = 8;
 // unrelated precision) — the standalone formatTime here is scoped to this
 // component only, no app-wide time-format change.
 const RESULT_TIME_FORMAT = "hh:mm:ss" as const;
+// Below this, a query is too short to be a meaningful search — searching on
+// every keystroke from the first letter would mostly just match noise.
+const MIN_QUERY_LENGTH = 3;
 
 /**
  * Search icon + anchored popover — "Search in the podcast" title, an input,
@@ -53,21 +56,18 @@ const RESULT_TIME_FORMAT = "hh:mm:ss" as const;
  * "why not share a component with ClipActionsMenu" applies equally here —
  * see that file's doc comment).
  *
+ * Search runs instantly as the user types, once the query reaches
+ * MIN_QUERY_LENGTH — no Enter press needed.
+ *
  * Query and results are deliberately NOT cleared when the popover closes —
  * closing only toggles visibility (`open`), this component instance itself
  * never unmounts (SearchButton lives in TopBar.tsx, which survives every
  * engine rebuild) — satisfying "search and its results persist until the
  * user clears them" for free, with no extra store needed.
- *
- * Search runs on Enter, not on every keystroke — `query` is the live input
- * value, `submittedQuery` is the last one actually searched. Editing the
- * input after submitting doesn't blank the current results; only pressing
- * Enter again re-runs the search against the new text.
  */
 export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [submittedQuery, setSubmittedQuery] = useState("");
   const [popoverPos, setPopoverPos] = useState({ top: 0, left: 0 });
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -77,13 +77,14 @@ export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps
   const { seekTo } = usePlaylistControls();
   const { index, isTranscribing } = useTranscriptIndex(tracks);
 
-  const hasSubmittedQuery = submittedQuery.trim().length > 0;
+  const trimmedQuery = query.trim();
+  const hasQuery = trimmedQuery.length >= MIN_QUERY_LENGTH;
   // The one real wait this popover has: a clip's transcript still catching
-  // up when Enter is pressed. Deliberate: per
+  // up while the user types. Deliberate: per
   // TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md's Phase 5, search must never
   // surface "transcription in progress" as its own concept to the user —
   // it just shows the same "Searching…" state until it settles.
-  const isSearching = hasSubmittedQuery && isTranscribing;
+  const isSearching = hasQuery && isTranscribing;
 
   // Capped to MAX_SEARCH_RESULTS — a common word can match hundreds of times
   // across a real podcast; searchClipWordIndex itself still returns every
@@ -91,18 +92,10 @@ export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps
   // by the caller. See utils/transcriptSearch.ts's capSearchResults doc
   // comment.
   const searchOutcome = useMemo(
-    () =>
-      hasSubmittedQuery && !isTranscribing ? capSearchResults(searchClipWordIndex(index, submittedQuery)) : null,
-    [index, submittedQuery, hasSubmittedQuery, isTranscribing]
+    () => (hasQuery && !isTranscribing ? capSearchResults(searchClipWordIndex(index, trimmedQuery)) : null),
+    [index, trimmedQuery, hasQuery, isTranscribing]
   );
   const results: SearchResult[] = searchOutcome?.results ?? [];
-
-  const handleInputKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      setSubmittedQuery(query);
-    }
-  };
 
   // Clamped on all four sides against the viewport, not just left/right —
   // previously only horizontal clamping existed, so a popover opened near
@@ -233,29 +226,28 @@ export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={handleInputKeyDown}
                   placeholder="Search words or phrases…"
                   className="w-full rounded-lg border border-[var(--border)] py-2 pl-8 pr-3 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-purple-500)]"
                 />
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-2">
-              {!hasSubmittedQuery && (
+              {query.length < MIN_QUERY_LENGTH && (
                 <p className="px-2 py-6 text-center text-sm text-[var(--text-muted)]">
-                  Type a word or phrase, then press Enter to search.
+                  Type a word or phrase to search.
                 </p>
               )}
-              {hasSubmittedQuery && isSearching && (
+              {hasQuery && isSearching && (
                 <div className="py-6">
                   <LoadingState message="Searching…" bare />
                 </div>
               )}
-              {hasSubmittedQuery && !isSearching && results.length === 0 && (
+              {hasQuery && !isSearching && results.length === 0 && (
                 <p className="px-2 py-6 text-center text-sm text-[var(--text-muted)]">
-                  No matches for &ldquo;{submittedQuery.trim()}&rdquo;.
+                  No matches for &ldquo;{trimmedQuery}&rdquo;.
                 </p>
               )}
-              {hasSubmittedQuery && !isSearching && results.length > 0 && (
+              {hasQuery && !isSearching && results.length > 0 && (
                 <ul className="flex flex-col gap-1.5">
                   {results.map((result, i) => (
                     <li key={`${result.clipId}-${result.timelineStart}-${i}`}>
@@ -271,7 +263,7 @@ export function SearchButton({ onSelectClip, onScrollToTime }: SearchButtonProps
              *  the cap instead of silently truncating, and says how many
              *  more exist so the user knows to narrow the query rather than
              *  wondering if search is broken. */}
-            {hasSubmittedQuery && !isSearching && searchOutcome?.truncated && (
+            {hasQuery && !isSearching && searchOutcome?.truncated && (
               <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-center text-xs text-[var(--text-muted)]">
                 Showing top {MAX_SEARCH_RESULTS} of {searchOutcome.totalMatches} matches — refine your search.
               </div>

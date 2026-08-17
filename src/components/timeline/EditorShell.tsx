@@ -42,7 +42,8 @@ interface EditorShellProps {
   /** True while a clip is decoding after an upload/drop — see
    *  TimelineStageProps' own doc comment. */
   isImportingClip: boolean;
-  onAddTrack: () => void;
+  /** Returns the new track's id — selected immediately on click below. */
+  onAddTrack: () => string;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
@@ -122,7 +123,7 @@ export function EditorShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackStates, touchMixerState]);
   const { selectedTrackId } = usePlaylistState();
-  const { scrollContainerRef, setSelectedTrackId, stop } = usePlaylistControls();
+  const { scrollContainerRef, setSelectedTrackId, stop, pause } = usePlaylistControls();
   const { isPlaying } = usePlaybackAnimation();
   // Owned here (not inside PlayButton/ClipDragLayer) since both need it —
   // see the doc comments on transport/PlayButton.tsx and
@@ -221,10 +222,21 @@ export function EditorShell({
   const activeTrackIdRef = useRef<string | null>(null);
   const effectiveTrackId = selectedTrackId ?? (tracks.length > 0 ? tracks[0].id : null);
 
+  // These three drive the blocking overlays further down and can each run
+  // for a while — the transport bar is disabled for their whole duration,
+  // so the user has no way to pause manually. isReady is excluded: a full
+  // engine rebuild already stops playback on its own before it ever starts
+  // (see CLAUDE.md's "editing while already playing" fix), so pausing again
+  // here would be redundant, not protective.
+  const isBusyWithAsyncOperation = isExporting || isRemovingSilence || isImportingClip;
+  useEffect(() => {
+    if (isBusyWithAsyncOperation && isPlaying) pause();
+  }, [isBusyWithAsyncOperation, isPlaying, pause]);
+
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — see useUndoRedoShortcut.ts. Gated on the
   // same isReady/isExporting/isRemovingSilence/isImportingClip signals
   // already gating TopBar/BottomBar below.
-  const editorBusy = !isReady || isExporting || isRemovingSilence || isImportingClip;
+  const editorBusy = !isReady || isBusyWithAsyncOperation;
   useUndoRedoShortcut(!editorBusy);
   // Delete/Backspace deletes the selected clip — see useDeleteClipShortcut.ts.
   useDeleteClipShortcut(!editorBusy, selectedClip, onDeleteClip);
@@ -413,7 +425,11 @@ export function EditorShell({
             />
             <div className="flex border-t border-[var(--border)] bg-[var(--surface)]">
               <div className="flex w-[180px] shrink-0 justify-center p-2">
-                <Button variant="secondary" onClick={onAddTrack} className="w-full">
+                <Button
+                  variant="secondary"
+                  onClick={() => setSelectedTrackId(onAddTrack())}
+                  className="w-full"
+                >
                   + New Track
                 </Button>
               </div>

@@ -4,6 +4,8 @@ import { makeSineWavFile } from "./fixtures";
 import { SELECTORS, waitForWaveformReady, uploadFiles, gotoEditor, readWav } from "./helpers";
 
 const EXPORT = { name: /Export/ } as const;
+const PLAY = { name: "Play", exact: true } as const;
+const PAUSE = { name: "Pause", exact: true } as const;
 const WAV_MENU_ITEM = { name: "WAV (lossless)" } as const;
 const MP3_128_MENU_ITEM = { name: "MP3 · 128 kbps" } as const;
 const AAC_128_MENU_ITEM = { name: "AAC · 128 kbps" } as const;
@@ -86,6 +88,25 @@ test.describe("Export", () => {
 
     await downloadPromise;
     await expect(page.getByTestId("transport-bar")).toHaveAttribute("aria-disabled", "false");
+  });
+
+  test("starting an export while playing pauses playback automatically", async ({ page }) => {
+    // The transport bar disables for the whole export (see the test above),
+    // so without an automatic pause the user would have no way to pause
+    // manually while it renders. A long clip, well beyond how long this
+    // small export can possibly take — otherwise the clip could just reach
+    // its own natural end mid-assertion, passing for the wrong reason.
+    await gotoEditor(page);
+    await uploadFiles(page, [makeSineWavFile("tone.wav", 30)]);
+
+    await page.getByRole("button", PLAY).click();
+    await expect(page.getByRole("button", PAUSE)).toBeVisible();
+
+    const downloadPromise = page.waitForEvent("download");
+    await exportAs(page, WAV_MENU_ITEM);
+
+    await expect(page.getByRole("button", PLAY)).toBeVisible();
+    await downloadPromise;
   });
 
   test("muting the only track shows an error instead of downloading silence", async ({ page }) => {

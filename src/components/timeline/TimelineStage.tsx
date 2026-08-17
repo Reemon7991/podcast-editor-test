@@ -27,7 +27,8 @@ interface TimelineStageProps {
    *  isRemovingSilence, instead of leaving a large upload silently pending
    *  with no visual feedback. */
   isImportingClip: boolean;
-  onAddTrack: () => void;
+  /** Returns the new track's id — EditorShell.tsx selects it right away. */
+  onAddTrack: () => string;
   onAddFilesToTrack: (trackId: string, files: File[], insertionTimeSeconds: number) => void;
   onDuplicateClip: (trackId: string, clipId: string) => void;
   onDeleteClip: (trackId: string, clipId: string) => void;
