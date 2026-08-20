@@ -6,7 +6,7 @@ import { hashFileBytes, registerAsset } from "../utils/assetRegistry";
 import { saveAsset, saveCompressedAsset } from "../utils/persistence";
 import { resolveNonOverlappingStart } from "../utils/clipGeometry";
 import { buildClipMeta } from "../utils/clipInsertion";
-import { compressAssetToChunks } from "../utils/audioCompression";
+import { compressAsset } from "../utils/audioCompression";
 import { runTranscriptionPipeline } from "../utils/transcription";
 import { useProjectStore } from "../store/projectStore";
 
@@ -103,9 +103,9 @@ export function useGenerateSpeech() {
         // logged and swallowed — the generated clip still works normally,
         // it just won't be searchable or offer filler-word removal.
         try {
-          const chunks = await compressAssetToChunks(audioContext, audioBuffer);
-          await saveCompressedAsset(assetId, chunks);
-          void runTranscriptionPipeline(assetId, chunks, audioBuffer.sampleRate);
+          const compressed = await compressAsset(audioBuffer);
+          await saveCompressedAsset(assetId, compressed);
+          void runTranscriptionPipeline(assetId, compressed);
         } catch (err) {
           console.error("[podcast-editor] Failed to compress generated clip for transcription", err);
         }

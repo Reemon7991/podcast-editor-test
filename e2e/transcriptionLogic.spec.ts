@@ -1,6 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { splitDurationIntoChunks, CHUNK_DURATION_SECONDS } from "../src/utils/audioCompression";
-import { settleWithConcurrencyLimit } from "../src/utils/concurrency";
 import { wordsInWindow } from "../src/utils/transcriptWindow";
 import {
   searchClipWordIndex,
@@ -20,95 +18,6 @@ import type { TranscriptWord } from "../src/utils/types";
  * work into permanent regression coverage — see CLAUDE.md's own
  * self-critique note on why that previously wasn't committed anywhere.
  */
-
-test.describe("splitDurationIntoChunks (audioCompression.ts)", () => {
-  test("a clip shorter than the chunk size yields exactly one chunk covering it all", () => {
-    expect(splitDurationIntoChunks(30, 600)).toEqual([{ startSeconds: 0, endSeconds: 30 }]);
-  });
-
-  test("exactly at the boundary still yields one chunk", () => {
-    expect(splitDurationIntoChunks(600, 600)).toEqual([{ startSeconds: 0, endSeconds: 600 }]);
-  });
-
-  test("just over the boundary splits into two, no overlap", () => {
-    expect(splitDurationIntoChunks(650, 600)).toEqual([
-      { startSeconds: 0, endSeconds: 600 },
-      { startSeconds: 600, endSeconds: 650 },
-    ]);
-  });
-
-  test("a multi-hour duration produces contiguous, gap-free, non-overlapping chunks", () => {
-    const chunks = splitDurationIntoChunks(7530, 600); // ~2h5m30s
-    let coveredUntil = 0;
-    for (const c of chunks) {
-      expect(c.startSeconds).toBe(coveredUntil);
-      coveredUntil = c.endSeconds;
-    }
-    expect(coveredUntil).toBe(7530);
-    expect(chunks.length).toBe(13);
-  });
-
-  test("zero or negative duration yields no chunks", () => {
-    expect(splitDurationIntoChunks(0)).toEqual([]);
-    expect(splitDurationIntoChunks(-5)).toEqual([]);
-  });
-
-  test("the exported default matches the documented 10-minute value", () => {
-    expect(CHUNK_DURATION_SECONDS).toBe(600);
-  });
-});
-
-test.describe("settleWithConcurrencyLimit (concurrency.ts)", () => {
-  test("never runs more than `limit` calls at once", async () => {
-    let current = 0;
-    let maxSeen = 0;
-    const items = Array.from({ length: 12 }, (_, i) => i);
-    await settleWithConcurrencyLimit(items, 3, async (i) => {
-      current++;
-      maxSeen = Math.max(maxSeen, current);
-      await new Promise((r) => setTimeout(r, 20 - i)); // varying delays, out-of-order completion
-      current--;
-      return i;
-    });
-    expect(maxSeen).toBeLessThanOrEqual(3);
-    expect(maxSeen).toBe(3); // confirms it actually reaches the limit, not just never exceeds it
-  });
-
-  test("results preserve input order regardless of completion order", async () => {
-    const items = [1, 2, 3, 4, 5];
-    const results = await settleWithConcurrencyLimit(items, 2, async (i) => {
-      await new Promise((r) => setTimeout(r, (5 - i) * 5)); // reverse completion order
-      return i * 10;
-    });
-    expect(results.map((r) => (r.status === "fulfilled" ? r.value : null))).toEqual([10, 20, 30, 40, 50]);
-  });
-
-  test("mixed fulfilled/rejected results are matched to the right item", async () => {
-    const results = await settleWithConcurrencyLimit([1, 2, 3, 4], 2, async (i) => {
-      if (i % 2 === 0) throw new Error(`fail-${i}`);
-      return `ok-${i}`;
-    });
-    expect(results[0]).toMatchObject({ status: "fulfilled", value: "ok-1" });
-    expect(results[1].status).toBe("rejected");
-    expect(results[2]).toMatchObject({ status: "fulfilled", value: "ok-3" });
-    expect(results[3].status).toBe("rejected");
-  });
-
-  test("limit=1 fully serializes — no overlap", async () => {
-    const order: string[] = [];
-    await settleWithConcurrencyLimit([1, 2, 3], 1, async (i) => {
-      order.push(`start-${i}`);
-      await new Promise((r) => setTimeout(r, 5));
-      order.push(`end-${i}`);
-    });
-    expect(order).toEqual(["start-1", "end-1", "start-2", "end-2", "start-3", "end-3"]);
-  });
-
-  test("empty input resolves to an empty array", async () => {
-    const results = await settleWithConcurrencyLimit([], 3, async () => "never");
-    expect(results).toEqual([]);
-  });
-});
 
 function words(strs: string[], startSeconds = 0, stepSeconds = 0.5): TranscriptWord[] {
   return strs.map((word, i) => ({ word, start: startSeconds + i * stepSeconds, end: startSeconds + i * stepSeconds + 0.4 }));

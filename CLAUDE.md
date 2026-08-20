@@ -15,12 +15,16 @@ the concrete gaps still open. Persistence, undo/redo, fade in/out, export,
 text-to-speech, and silence removal are all done (see the persistence/
 undo-redo layer section, "Fade in/out", "Export", "Text-to-Speech (Cartesia)",
 and "Silence removal" below), each with a committed test suite. On top of
-those, a **word-level transcription pipeline (Whisper via OpenRouter) and
-audio search are now also done** (see "Transcription pipeline + Audio search"
-below) — verified live against a real production build at every phase, but
-**not yet covered by a committed Playwright suite** (ad-hoc scratchpad
-verification only, same discipline the rest of this file used before the
-persistence/undo-redo layer's suite existed — see "Verification approach").
+those, a **word-level transcription pipeline (AssemblyAI) and audio search
+are now also done** (see "Transcription pipeline + Audio search" below),
+**with a committed Playwright suite** (`e2e/transcribeRoute.spec.ts`,
+`transcriptionLogic.spec.ts`, `transcriptionPipeline.spec.ts`,
+`transcription.spec.ts`, `search.spec.ts`) — correcting an earlier pass of
+this file, which claimed this feature had only ad-hoc scratchpad
+verification; that was true when first built but stopped being true once the
+suite landed, and this file drifted behind the actual repo state until now.
+The transcription provider was originally OpenRouter/Whisper, later swapped
+to AssemblyAI — see `ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md`.
 **Filler-word removal — the other feature this transcription pipeline was
 built for — has not been started yet.** Every non-obvious decision below
 exists because of something concretely discovered while building this, not
@@ -99,10 +103,12 @@ those two; the AI features are the most speculative and probably last).
    found building and then actually using it; `SILENCE_REMOVAL_PLAN.md` is
    the original design doc, kept corrected against what actually shipped,
    same discipline as `TTS_CARTESIA_PLAN.md`. Word-level transcription
-   (Whisper via OpenRouter, backend-owned like TTS) and audio search built on
-   top of it: **done** — see "Transcription pipeline + Audio search" below;
-   `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md` is the original design doc for
-   both this and the still-open item below, same "kept corrected" discipline.
+   (AssemblyAI, backend-owned like TTS — originally OpenRouter/Whisper, later
+   swapped, see `ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md`) and audio search
+   built on top of it: **done** — see "Transcription pipeline + Audio search"
+   below; `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md` is the original design
+   doc for both this and the still-open item below, same "kept corrected"
+   discipline.
    **Filler-word removal is the one AI feature still not started** — the
    transcription pipeline it depends on is done and its own plan doc already
    spells out the intended design (per-clip menu item, disabled until that
@@ -1374,13 +1380,17 @@ bug 8) — not just the small clips the committed suite uses.
 
 ## Transcription pipeline + Audio search (done)
 
-Word-level transcription (Whisper via OpenRouter) for every uploaded/
-generated clip, feeding a "Search in the podcast" popover. Full design:
-`TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md`, kept corrected against what
-actually shipped, same discipline as `SILENCE_REMOVAL_PLAN.md`/
-`TTS_CARTESIA_PLAN.md`. Filler-word removal — the other feature this
-pipeline was built for — is not started; see that plan doc's Phase 6 for the
-intended design.
+Word-level transcription (**AssemblyAI**, `universal-3-5-pro`) for every
+uploaded/generated clip, feeding a "Search in the podcast" popover. Original
+design: `TRANSCRIPTION_SEARCH_FILLER_WORDS_PLAN.md`. **The provider was later
+swapped from Whisper-via-OpenRouter to AssemblyAI** — see
+`ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md` for the full rationale (OpenRouter's
+25MB/~60s-per-request limits forced a chunk-fan-out-merge design; AssemblyAI's
+5GB/10hr async submit-then-poll model doesn't need it) and everything below
+reflects the swapped-in design, kept corrected against what actually shipped,
+same discipline as `SILENCE_REMOVAL_PLAN.md`/`TTS_CARTESIA_PLAN.md`.
+Filler-word removal — the other feature this pipeline was built for — is not
+started; see the original plan doc's Phase 6 for the intended design.
 
 **The one finding that shapes the whole design**: `ClipMeta`/`AudioClip`
 already carries everything needed to make a transcript survive move/trim/
@@ -1396,84 +1406,106 @@ halves). Only a **splice** (silence removal, and filler-word removal once
 built) breaks this, since it mints a new content-hash `assetId` — see the
 remap step below.
 
-**Files**: `src/utils/audioCompression.ts` (chunk-then-Opus-encode, via
-`mediabunny`), `src/utils/concurrency.ts` (`settleWithConcurrencyLimit` —
-generic, Node-unit tested `Promise.allSettled`-with-a-cap helper; see below),
-`src/utils/transcription.ts` (`runTranscriptionPipeline` —
-plain function, not a hook, called from both the upload and TTS paths),
-`src/app/api/transcribe/route.ts` (holds `OPENROUTER_API_KEY`, mirrors
-`api/tts/route.ts`'s retry-on-429/5xx-never-4xx shape exactly), `src/utils/
-transcriptWindow.ts` (`wordsInWindow` — the one "which words are audible in
-this clip" filter, shared by search and the remap below so the rule can't
-drift), `src/utils/transcriptRemap.ts` (`remapWordsThroughKeptRanges` — see
-below), `src/utils/transcriptSearch.ts` (pure phrase-search logic) +
-`src/hooks/useTranscriptIndex.ts` (the reactive wrapper), `src/components/
-search/SearchButton.tsx` (the whole search UI — self-contained trigger +
-popover, modeled on `ui/MenuButton.tsx`'s positioning/dismiss mechanics).
-`src/store/transcriptStore.ts` is a **new, separate** Zustand store (`assetId
--> AssetTranscript`) — deliberately never wired into `projectStore.ts` or
-read above/inside `TimelineStage.tsx`, to avoid a second instance of the
+**Files**: `src/utils/audioCompression.ts` (`compressAsset` — single-shot
+downmix+resample+Opus-encode, via `mediabunny`), `src/utils/transcription.ts`
+(`runTranscriptionPipeline`/`resumeTranscriptionPipeline` — plain functions,
+not hooks, called from the upload/TTS paths and from
+`useProjectHydration.ts`'s reload re-kick, respectively), `src/app/api/
+transcribe/route.ts` (submit half — uploads to AssemblyAI, submits the job,
+returns `{transcriptId}`; holds `ASSEMBLYAI_API_KEY`, retries once on
+429/5xx per outgoing call, mirrors `api/tts/route.ts`'s shape), `src/app/api/
+transcribe/[id]/route.ts` (poll half — proxies AssemblyAI's status endpoint,
+converts word timestamps ms→s, maps `queued`/`processing`→`"transcribing"`,
+`completed`→`"done"`, `error`→`"failed"`), `src/utils/transcriptWindow.ts`
+(`wordsInWindow` — the one "which words are audible in this clip" filter,
+shared by search and the remap below so the rule can't drift), `src/utils/
+transcriptRemap.ts` (`remapWordsThroughKeptRanges` — see below), `src/utils/
+transcriptSearch.ts` (pure phrase-search logic) + `src/hooks/
+useTranscriptIndex.ts` (the reactive wrapper), `src/components/search/
+SearchButton.tsx` (the whole search UI — self-contained trigger + popover,
+modeled on `ui/MenuButton.tsx`'s positioning/dismiss mechanics).
+`src/store/transcriptStore.ts` is a **separate** Zustand store (`assetId ->
+AssetTranscript`) — deliberately never wired into `projectStore.ts` or read
+above/inside `TimelineStage.tsx`, to avoid a second instance of the
 `processingClipId` bug documented in "Silence removal" below (any state that
 changes independently of a real `commit()`, if visible above `TimelineStage`,
 defeats its passthrough-cache and forces spurious full engine rebuilds — this
 store's status changes constantly and asynchronously, exactly that class of
-state). `src/utils/persistence.ts` gained two IndexedDB stores
-(`compressedAssets`, `transcripts`; `DB_VERSION` bumped to 2, `upgrade()`
-guarded on `oldVersion` so an existing v1 database isn't recreated).
-`useProjectHydration.ts` now also batch-loads transcripts on mount and
-re-kicks any left `"pending"`/`"transcribing"` from a tab closed mid-flight
-(cheap — reuses the already-persisted compressed chunks, no re-decode/
-re-compress).
+state). `src/utils/persistence.ts`'s `compressedAssets` store now holds one
+Opus blob per asset (not an array of chunks); `transcripts` gained an
+optional `providerJobId` field (AssemblyAI's transcript id) so a reload can
+resume polling an in-flight job instead of resubmitting a duplicate one — see
+below. `useProjectHydration.ts` batch-loads transcripts on mount and
+re-kicks any left `"pending"`/`"transcribing"` from a tab closed mid-flight.
 
-**Compression: chunk-first, then Opus-encode each chunk** — not one
-whole-asset compressed file. OpenRouter's transcription endpoint has both a
-25MB size cap AND a ~60s upstream processing timeout independent of size (a
-tiny-but-long Opus file can still time out); chunking by duration (~10
-min/chunk) solves both at once, and a chunk is reused as-is for its own
-transcription request body with no second encode pass. `mediabunny` (not
-`opus-recorder`, tried first and rejected — confirmed via its own README
-it's built exclusively around live `MediaStream` capture, with no way to
-feed it an already-decoded buffer without literally replaying it in real
-time) does the actual encode: `AudioBufferSource` takes a real `AudioBuffer`
-directly, `OggOutputFormat` + `BufferTarget` produce a self-contained file in
-memory. **Requires a secure context** (`AudioEncoder` is `undefined`
-otherwise) — a non-issue for this app (always `localhost` or real HTTPS), but
-`playwright-core`'s default headless launch (`chromium_headless_shell`) has
-no `AudioEncoder` at all, unrelated to secure-context — any Playwright
-verification of this feature (manual scratchpad script or a future committed
-e2e spec) must launch the full Chromium binary (`chrome-win64/chrome.exe`
-under the cached revision folder), not rely on the default headless config,
-or it fails for a reason that has nothing to do with the app. Real measured
-number: a ~5s real-speech clip compressed from 418KB (WAV) to 13KB
-(mono/16kHz Opus, 24kbps) — ~97% smaller.
+**Compression: one Opus blob per asset, not chunked** — AssemblyAI's
+5GB/10hr per-request limit comfortably covers this app's target (2-3 hour
+podcasts) in a single job, unlike OpenRouter's old 25MB/~60s-per-request
+constraints, which forced chunking. `mediabunny` (not `opus-recorder`, tried
+first and rejected — confirmed via its own README it's built exclusively
+around live `MediaStream` capture, with no way to feed it an already-decoded
+buffer without literally replaying it in real time) does the actual encode:
+`AudioBufferSource` takes a real `AudioBuffer` directly, `OggOutputFormat` +
+`BufferTarget` produce a self-contained file in memory. **Requires a secure
+context** (`AudioEncoder` is `undefined` otherwise) — a non-issue for this
+app (always `localhost` or real HTTPS), but `playwright-core`'s default
+headless launch (`chromium_headless_shell`) has no `AudioEncoder` at all,
+unrelated to secure-context — any Playwright verification of this feature
+must launch the full Chromium binary, not rely on the default headless
+config. Real measured number (pre-dates the chunking removal, still the same
+per-byte ratio): a ~5s real-speech clip compressed from 418KB (WAV) to 13KB
+(mono/16kHz Opus, 24kbps) — ~97% smaller. `mediabunny`'s own `AudioSample`
+implementation already internally sub-chunks any input buffer into ≤5s
+pieces and respects encoder backpressure regardless of call count (confirmed
+by reading `node_modules/mediabunny/dist/modules/src/{sample,media-source}.js`
+directly during a later self-review) — so encoding a whole multi-hour buffer
+in one `compressAsset()` call carries the same behavior as the old
+call-once-per-chunk approach, not a new risk.
 
-**OpenRouter request/response, confirmed live** (not trusted from docs alone
-— same discipline as Cartesia's voice-list finding below): `POST https://
-openrouter.ai/api/v1/audio/transcriptions`, `model: "openai/whisper-large-v3"`,
-`response_format: "verbose_json"`, `timestamp_granularities: ["word"]`,
-multipart `file`. Response: `{ text, usage: {seconds, cost}, language,
-duration, words: [{ word, start, end }] }` — the field is `word`, not `text`
-as an earlier docs pass assumed. Word-level timestamps confirmed accurate
-against a known phrase, both on a raw WAV and on the actual compressed Opus
-file this pipeline produces.
+**AssemblyAI request/response, confirmed live** (not trusted from docs alone
+— same discipline as Cartesia's voice-list finding below):
+`POST https://api.assemblyai.com/v2/upload` (raw bytes → `{upload_url}`),
+`POST https://api.assemblyai.com/v2/transcript` (`{audio_url, speech_models:
+["universal-3-5-pro"], disfluencies: true, language_detection: true, prompt:
+"Transcribe verbatim..."}` → `{id, status}` — initial status came back
+`"processing"` in testing, not the docs' `"queued"`, irrelevant here since
+both map to this app's `"transcribing"`), `GET .../v2/transcript/{id}` →
+`status` one of `queued`/`processing`/`completed`/`error`; on `completed`,
+`words: [{text, start, end}]` with **`start`/`end` in milliseconds** —
+unlike OpenRouter's Whisper response, which was seconds; the poll route
+converts before any word reaches the client, so `TranscriptWord`'s existing
+seconds contract never changed downstream. Field is `text`, not `word`
+(another real difference from OpenRouter's shape). Disfluencies + the
+verbatim prompt confirmed working together live: a scripted "Um, so, I
+think, you know, this is, uh, ..." sample came back with every filler word
+intact, including a scripted self-correction. Full detail:
+`ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md`'s Phase 0.
 
-**Chunk requests are concurrency-capped at 3, and the merge across chunks is
-verified live, not just reasoned about** — both added in a post-Phase-5
-self-review. A long asset (18 chunks for a 3-hour podcast at the default
-10-min chunk size) firing every chunk at OpenRouter simultaneously is a real
-way to trigger rate limiting; `transcription.ts` now runs chunk requests
-through `concurrency.ts`'s cap instead of a bare `Promise.allSettled`. The
-original Phase 0-3 pass never actually exercised >1 chunk (every test clip
-produced exactly one) — closed by temporarily lowering
-`CHUNK_DURATION_SECONDS` to 8s and uploading a real ~12.6s clip with 3
-chapter-marker checkpoints spanning the boundary: exactly 2 requests fired,
-36 words merged in correct order, and the marker spoken *after* the boundary
-landed at 9.5s, not reset near 0 — confirming the chunk-offset math. Constant
-reverted afterward; a full rebuild confirmed unchanged default behavior.
+**Submit/poll, not fan-out/merge** — `runTranscriptionPipeline` submits once,
+persists `{status: "transcribing", providerJobId}` (awaited, not
+fire-and-forget — closes a race where a tab closing in the brief window
+before that write lands would leave `useProjectHydration.ts`'s reload
+re-kick with nothing to resume from), then polls `GET
+/api/transcribe/[id]` every 3s (`utils/transcription.ts`'s
+`POLL_INTERVAL_MS`) up to a 60-minute safety-net budget
+(`MAX_POLL_ATTEMPTS`). Both the submit and poll `fetch` calls carry their own
+`AbortController` timeout (a hung, non-erroring request previously could have
+silently defeated the whole poll budget) and `submit()` retries once on a
+network-level failure (a large one-shot upload has real odds of a transient
+blip, and unlike the old per-chunk design there's no smaller unit to retry
+if it fails partway). If the poll loop exhausts its budget, the persisted
+error reflects the *last real failure* seen (a repeatedly-erroring status
+check) rather than a generic "timed out" — a dead server and a job that's
+genuinely still processing after an hour are different problems and
+shouldn't read the same. `useProjectHydration.ts`'s reload re-kick resumes
+polling the same `providerJobId` when one exists rather than resubmitting a
+duplicate job — not possible under the old design, where each OpenRouter
+chunk call was one synchronous request/response with nothing left mid-flight
+across a reload.
 
 **Re-transcription for spliced assets (silence removal today; filler-word
 removal will hit the same path once built): remap, not re-transcribe.**
-`silenceDetection.ts`'s `spliceOutSilence` now also returns `keepRanges`;
+`silenceDetection.ts`'s `spliceOutSilence` also returns `keepRanges`;
 `useRemoveSilence.ts` remaps the source clip's transcript through them
 locally (`transcriptRemap.ts`) with zero network call whenever the source had
 a finished transcript to remap from — keeps silence removal's existing
@@ -1484,7 +1516,7 @@ Cartesia-synthesized phrases separated by a genuine 3s silence gap — all 16
 transcribed words survived except the ones actually inside the removed gap
 (correctly dropped, including one that straddled a cut boundary), the new
 asset's transcript appeared **~7ms** after the splice committed (vs.
-500ms-2s+ for every observed real OpenRouter call — unambiguous proof the
+500ms-2s+ for every observed real transcription call — unambiguous proof the
 local remap ran, not the network fallback), and the first word after the gap
 shifted by ~2.78s — matching the ~3s gap minus the padding silence removal
 keeps on each cut's edges.
@@ -1494,10 +1526,12 @@ TopBar-owned-state assumption): `SearchButton.tsx` owns its own
 `query`/`submittedQuery`/results state directly — it never unmounts (lives in
 `TopBar.tsx`, which survives every engine rebuild), so closing the popover
 only toggles visibility, satisfying "search and results persist until
-cleared" with no extra store. **Search runs on Enter, not on every
-keystroke** (changed after initial live-search felt noisy) — editing the
-query afterward without pressing Enter again leaves the last results
-showing, doesn't blank them. Transcription status is invisible to the
+cleared" with no extra store. **Search runs instantly as the user types**,
+once the query reaches `MIN_QUERY_LENGTH` (3) — no Enter press needed
+(correcting an earlier pass of this file, which described a since-superseded
+Enter-to-search/debounce design; the live `SearchButton.tsx` and
+`e2e/search.spec.ts` both confirm instant search is the current, tested
+behavior). Transcription status is invisible to the
 searching user by design: if any clip's transcript is still catching up when
 Enter is pressed, the popover just shows the same generic "Searching…" state
 `useTranscriptIndex.ts`'s `isTranscribing` flag drives — never a
@@ -1523,18 +1557,28 @@ the Phase 1 notes above already document hitting once). **Verified live**: uploa
 ("Welcome to the Elephant Sanctuary Podcast…"), searched "elephant" — 2
 correctly-matched results, selecting one flipped the toolbar's Duplicate
 button from disabled to enabled (selection confirmed) and moved
-`current-time` to exactly `match_start - 0.5s`; typing without pressing Enter
-produced zero results (confirming the old debounce-driven live search is
-really gone); closing and reopening the popover preserved the same query and
-results.
+`current-time` to exactly `match_start - 0.5s`; closing and reopening the
+popover preserved the same query and results. (This pass predates the
+instant-search UX fixed above — corrected there rather than re-verified
+here, since the underlying search/index logic this paragraph is really
+checking is unaffected by that later UX change.)
 
-**Not built / disclosed gaps**: no committed Playwright suite for any of
-this yet (every phase verified live via ad-hoc scratchpad Playwright
-scripts against real production builds and, where relevant, real Whisper/
-Cartesia calls — see "Verification approach" below); a `"failed"` transcript
-(every chunk failed) has no retry affordance beyond the reload-time re-kick;
-the filler-word dictionary/UI itself doesn't exist yet (see the "Planned
-features" bullet above and the plan doc's Phase 6); a stale `next dev`/`next
+**Not built / disclosed gaps**: a committed Playwright suite now covers this
+feature (`e2e/transcribeRoute.spec.ts`, `transcriptionLogic.spec.ts`,
+`transcriptionPipeline.spec.ts`, `transcription.spec.ts`, `search.spec.ts` —
+correcting an earlier pass of this file, which claimed only ad-hoc
+scratchpad verification existed; that was true when first built but stopped
+being true once the suite landed); a `"failed"` transcript has no retry
+affordance beyond the reload-time re-kick; the filler-word dictionary/UI
+itself doesn't exist yet (see the "Planned features" bullet above and the
+plan doc's Phase 6); **AssemblyAI has been observed dropping a contiguous
+span of words from the middle of an otherwise-complete, consistent-quality
+transcript** (reported directly, on real Arabic speech) — confirmed via the
+compressed audio actually uploaded being intact for that span, so the loss
+is on the transcription side, not this app's compression/upload pipeline;
+root cause not yet isolated (long-context ASR degradation vs. content-
+specific — see the isolation-test approach discussed when this was found)
+and no mitigation has been built; a stale `next dev`/`next
 start` process left running on port 3000 from an earlier session silently
 absorbed test traffic more than once while verifying this feature — same
 "confirm the shared dev server is actually alive before suspecting the code"
@@ -1574,13 +1618,16 @@ worth remembering specifically because it recurred here.
   "Silence removal" below). It was already resolved transitively via
   `browser`/`engine`/`ui-components` before this, so nothing new actually
   installs; only `package.json` gained a manifest entry.
-- **`OPENROUTER_API_KEY` must be set (server-only, never `NEXT_PUBLIC_*`) for
-  transcription (and therefore search) to work.** Read by `src/app/api/
-  transcribe/route.ts` from `process.env` — unset, the route returns a clean
-  500, same pattern `CARTESIA_API_KEY` above already established. Not
-  required for anything else — every other feature (including playback,
-  editing, export) works with it unset; a clip just never gets a transcript,
-  so it's silently excluded from search. Restart the server after setting it.
+- **`ASSEMBLYAI_API_KEY` must be set (server-only, never `NEXT_PUBLIC_*`) for
+  transcription (and therefore search) to work.** Read by both `src/app/api/
+  transcribe/route.ts` (submit) and `src/app/api/transcribe/[id]/route.ts`
+  (poll) from `process.env` — unset, either route returns a clean 500, same
+  pattern `CARTESIA_API_KEY` above already established. Not required for
+  anything else — every other feature (including playback, editing, export)
+  works with it unset; a clip just never gets a transcript, so it's silently
+  excluded from search. Restart the server after setting it. Supersedes
+  `OPENROUTER_API_KEY`, which this app no longer reads at all — see
+  `ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md` for the provider swap.
 - **`mediabunny` is a direct dependency**, added for the transcription
   pipeline's compression step (Opus-encoding an already-decoded `AudioBuffer`
   — see "Transcription pipeline + Audio search" above for why it was chosen

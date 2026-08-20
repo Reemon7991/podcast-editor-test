@@ -6,7 +6,7 @@ import { loadProject, loadAssets, loadTranscripts, loadCompressedAsset } from ".
 import { registerAsset } from "../utils/assetRegistry";
 import { useProjectStore } from "../store/projectStore";
 import { useTranscriptStore } from "../store/transcriptStore";
-import { runTranscriptionPipeline } from "../utils/transcription";
+import { runTranscriptionPipeline, resumeTranscriptionPipeline } from "../utils/transcription";
 import type { TrackMeta } from "../utils/types";
 
 /**
@@ -67,7 +67,6 @@ export function useProjectHydration(): {
 
         const audioContext = Tone.getContext().rawContext as AudioContext;
         const decodedAssetIds = new Set<string>();
-        const sampleRateByAssetId = new Map<string, number>();
         await Promise.all(
           assetIds.map(async (assetId) => {
             const blob = blobsByAssetId.get(assetId);
@@ -82,7 +81,6 @@ export function useProjectHydration(): {
               const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
               registerAsset(audioBuffer, assetId);
               decodedAssetIds.add(assetId);
-              sampleRateByAssetId.set(assetId, audioBuffer.sampleRate);
             } catch (err) {
               console.error(`[podcast-editor] Failed to decode asset "${assetId}"`, err);
             }
@@ -94,9 +92,12 @@ export function useProjectHydration(): {
         // deliberately never wired into projectStore/TimelineStage), so
         // without this, search/filler-word removal would silently show "no
         // transcript" for every asset after every reload. Any transcript
-        // still "pending"/"transcribing" (tab closed mid-flight) is
-        // re-kicked against its already-persisted compressed chunks — cheap,
-        // no re-decode/re-compress needed.
+        // still "pending"/"transcribing" (tab closed mid-flight) is re-kicked
+        // — resuming the same AssemblyAI job via providerJobId when one
+        // exists (no duplicate job submitted), falling back to a fresh
+        // submit against the persisted compressed blob otherwise (a legacy
+        // pre-refactor record, or a submit that never got far enough to
+        // receive a job id).
         const decodedAssetIdList = Array.from(decodedAssetIds);
         const transcriptsByAssetId = await loadTranscripts(decodedAssetIdList);
         const { setTranscript } = useTranscriptStore.getState();
@@ -109,10 +110,13 @@ export function useProjectHydration(): {
             if (!transcript || (transcript.status !== "pending" && transcript.status !== "transcribing")) {
               return;
             }
-            const chunks = await loadCompressedAsset(assetId);
-            const sampleRate = sampleRateByAssetId.get(assetId);
-            if (chunks && chunks.length > 0 && sampleRate) {
-              void runTranscriptionPipeline(assetId, chunks, sampleRate);
+            if (transcript.providerJobId) {
+              void resumeTranscriptionPipeline(assetId, transcript.providerJobId);
+              return;
+            }
+            const compressed = await loadCompressedAsset(assetId);
+            if (compressed) {
+              void runTranscriptionPipeline(assetId, compressed);
             }
           })
         );

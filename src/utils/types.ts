@@ -38,21 +38,13 @@ export interface AssetTranscript {
   status: TranscriptStatus;
   /** null until status is "done". */
   words: TranscriptWord[] | null;
-  /** Set when some chunks succeeded and others failed — status is still
-   *  "done" in that case (the words that did come back are still usable),
-   *  this just discloses the gap rather than hiding it. */
+  /** Legacy field from the old per-chunk pipeline. Unused post-AssemblyAI
+   *  refactor — kept optional so old persisted records still typecheck. */
   partialFailure?: boolean;
   error?: string;
   updatedAt: number;
-}
-
-/** One Opus-encoded, duration-bounded segment of a compressed asset — see
- *  utils/audioCompression.ts. `startSample`/`endSample` are in the
- *  *original* asset's sample space (its own native sampleRate), matching
- *  TranscriptWord's own asset-relative coordinate space, even though the
- *  blob itself is encoded at 16kHz mono. */
-export interface CompressedChunk {
-  startSample: number;
-  endSample: number;
-  blob: Blob;
+  /** AssemblyAI's transcript id for the in-flight/most recent job on this
+   *  asset. Lets a reload resume polling instead of resubmitting — see
+   *  ASSEMBLYAI_TRANSCRIPTION_REFACTOR_PLAN.md. */
+  providerJobId?: string;
 }

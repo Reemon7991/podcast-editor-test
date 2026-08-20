@@ -53,7 +53,7 @@ const GENERATE_MODAL = { name: "Generate clip (AI)" } as const;
  * first, then compressedAssets, never the other way around.
  */
 test.describe("Transcription pipeline", () => {
-  test("uploading a clip persists a compressed-chunk record and a transcript that settles to 'done'", async ({
+  test("uploading a clip persists a compressed-asset record and a transcript that settles to 'done'", async ({
     page,
   }) => {
     await gotoEditor(page);
@@ -133,7 +133,7 @@ test.describe("Transcription pipeline", () => {
     expect(await countIndexedDbRecords(page, "compressedAssets")).toBe(1);
   });
 
-  test("a chunk request that fails settles the transcript to 'failed', not stuck forever", async ({ page }) => {
+  test("a submit request that fails settles the transcript to 'failed', not stuck forever", async ({ page }) => {
     await gotoEditor(page);
     await page.route("**/api/transcribe", (route) =>
       route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "boom" }) })

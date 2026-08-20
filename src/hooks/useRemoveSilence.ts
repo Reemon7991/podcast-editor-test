@@ -8,7 +8,7 @@ import { saveAsset, saveCompressedAsset, saveTranscript } from "../utils/persist
 import { spliceOutSilence } from "../utils/silenceDetection";
 import { encodeWavPcm16 } from "../utils/wavEncode";
 import { remapWordsThroughKeptRanges } from "../utils/transcriptRemap";
-import { compressAssetToChunks } from "../utils/audioCompression";
+import { compressAsset } from "../utils/audioCompression";
 import { runTranscriptionPipeline } from "../utils/transcription";
 import type { AssetTranscript, ClipMeta } from "../utils/types";
 import { useProjectStore } from "../store/projectStore";
@@ -129,10 +129,10 @@ export function useRemoveSilence() {
             console.error("[podcast-editor] Failed to persist remapped transcript", err);
           });
         } else {
-          compressAssetToChunks(audioContext, result.buffer)
-            .then(async (chunks) => {
-              await saveCompressedAsset(assetId, chunks);
-              void runTranscriptionPipeline(assetId, chunks, result.buffer.sampleRate);
+          compressAsset(result.buffer)
+            .then(async (compressed) => {
+              await saveCompressedAsset(assetId, compressed);
+              void runTranscriptionPipeline(assetId, compressed);
             })
             .catch((err) => {
               console.error("[podcast-editor] Failed to compress silence-trimmed clip for transcription", err);

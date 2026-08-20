@@ -268,21 +268,22 @@ export async function waitForTranscriptSettled(page: Page, timeoutMs = 15000): P
 }
 
 /**
- * Mocks POST /api/transcribe at the browser level — same layer tts.spec.ts
- * already mocks `**\/api/tts` at (see that file and ttsRoute.spec.ts's own
- * doc comment on the split): real coverage of the client's reaction to a
- * response, zero coverage of the route handler itself (that's
- * transcribeRoute.spec.ts's job). Every clip in this suite is small enough
- * to produce exactly one chunk, so one fixed response per request is
- * equivalent to "each chunk gets its own" — the multi-chunk merge/offset
- * path is covered directly in transcriptionPipeline.spec.ts (a Node-level
- * test of `runTranscriptionPipeline` itself, not this browser-level mock).
+ * Mocks both transcription routes at the browser level — POST /api/transcribe
+ * (submit, returns a fake job id) and GET /api/transcribe/[id] (poll, returns
+ * "done" immediately with the given words, no real polling delay). Same
+ * layer tts.spec.ts already mocks `**\/api/tts` at (see that file and
+ * ttsRoute.spec.ts's own doc comment on the split): real coverage of the
+ * client's reaction, zero coverage of either route handler's own logic
+ * (that's transcribeRoute.spec.ts's job).
  */
 export async function mockTranscribeRoute(
   page: Page,
   words: { word: string; start: number; end: number }[]
 ): Promise<void> {
   await page.route("**/api/transcribe", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ words }) })
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ transcriptId: "mock-job-id" }) })
+  );
+  await page.route("**/api/transcribe/*", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "done", words }) })
   );
 }

@@ -51,7 +51,7 @@ test.describe("Search in the podcast", () => {
     await page.getByPlaceholder(SEARCH_PLACEHOLDER).fill("fo");
 
     await expect(page.locator('[role="dialog"] ul li')).toHaveCount(0);
-    await expect(page.getByText("Type a word or phrase to search.")).toBeHidden();
+    await expect(page.getByText("Type a word or phrase to search.")).toBeVisible();
     await expect(page.getByText(/No matches for/)).toBeHidden();
   });
 
@@ -134,14 +134,24 @@ test.describe("Search in the podcast", () => {
     page,
   }) => {
     await gotoEditor(page);
+    // Submit resolves immediately (status flips to "transcribing" right
+    // away) — the poll call is what hangs, matching the "still in flight"
+    // window this test actually needs to observe.
+    await page.route("**/api/transcribe", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ transcriptId: "job-1" }) })
+    );
     let resolveTranscribe!: () => void;
     await page.route(
-      "**/api/transcribe",
+      "**/api/transcribe/*",
       (route) =>
         new Promise<void>((resolve) => {
           resolveTranscribe = () => {
             route
-              .fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ words: MOCK_WORDS }) })
+              .fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({ status: "done", words: MOCK_WORDS }),
+              })
               .then(resolve);
           };
         })

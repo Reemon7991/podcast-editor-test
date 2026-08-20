@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { AssetTranscript, CompressedChunk, TrackMeta } from "./types";
+import type { AssetTranscript, TrackMeta } from "./types";
 
 /**
  * IndexedDB persistence. See PERSISTENCE_UNDO_ORIGINAL_PLAN.md's Phase 3 for
@@ -19,11 +19,11 @@ import type { AssetTranscript, CompressedChunk, TrackMeta } from "./types";
  * idempotent overwrite of the same record, not a duplicate — cross-upload
  * dedup falls out of the key itself, no extra logic needed here.
  *
- * `compressedAssets` holds the Opus-encoded, duration-bounded chunks each
- * asset gets split into for transcription (see utils/audioCompression.ts) —
- * one record per assetId, holding every chunk for that asset. `transcripts`
- * holds one `AssetTranscript` per assetId (status + word-level timestamps,
- * asset-relative — see utils/types.ts's own doc comment on why).
+ * `compressedAssets` holds the Opus-encoded blob each asset gets compressed
+ * to for transcription (see utils/audioCompression.ts) — one record per
+ * assetId. `transcripts` holds one `AssetTranscript` per assetId (status +
+ * word-level timestamps, asset-relative — see utils/types.ts's own doc
+ * comment on why).
  */
 
 const DB_NAME = "editor-pro";
@@ -47,7 +47,7 @@ interface AssetRecord {
 }
 
 interface CompressedAssetRecord {
-  chunks: CompressedChunk[];
+  blob: Blob;
   addedAt: number;
 }
 
@@ -148,18 +148,19 @@ export async function loadAssets(assetIds: string[]): Promise<Map<string, Blob>>
 }
 
 /** Same idempotent-overwrite-by-content-hash property as saveAsset — an
- *  assetId's compressed chunks never change once computed (the source
- *  bytes they're derived from are the same content-addressed asset), so a
- *  repeat write is always a no-op in practice, not a real overwrite. */
-export async function saveCompressedAsset(assetId: string, chunks: CompressedChunk[]): Promise<void> {
+ *  assetId's compressed blob never changes once computed, so a repeat write
+ *  is always a no-op in practice, not a real overwrite. A pre-refactor
+ *  record has a `.chunks` field instead of `.blob` — read as undefined,
+ *  handled the same as "nothing cached" by every caller. */
+export async function saveCompressedAsset(assetId: string, blob: Blob): Promise<void> {
   const db = await getDb();
-  await db.put(COMPRESSED_ASSETS_STORE, { chunks, addedAt: Date.now() }, assetId);
+  await db.put(COMPRESSED_ASSETS_STORE, { blob, addedAt: Date.now() }, assetId);
 }
 
-export async function loadCompressedAsset(assetId: string): Promise<CompressedChunk[] | undefined> {
+export async function loadCompressedAsset(assetId: string): Promise<Blob | undefined> {
   const db = await getDb();
   const record = await db.get(COMPRESSED_ASSETS_STORE, assetId);
-  return record?.chunks;
+  return record?.blob;
 }
 
 export async function saveTranscript(transcript: AssetTranscript): Promise<void> {

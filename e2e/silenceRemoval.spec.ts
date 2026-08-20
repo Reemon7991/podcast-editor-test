@@ -259,9 +259,16 @@ test.describe("Remove silence", () => {
   test("silence removal remaps the source transcript locally instead of re-transcribing", async ({ page }) => {
     await gotoEditor(page);
 
+    // transcribeCallCount tracks the *submit* route only — that's the "did
+    // we kick off a new transcription job" signal; the poll route is hit
+    // regardless of whether remap or re-transcription happened, so it isn't
+    // the right thing to count.
     let transcribeCallCount = 0;
     await page.route("**/api/transcribe", (route) => {
       transcribeCallCount++;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ transcriptId: "job-1" }) });
+    });
+    await page.route("**/api/transcribe/*", (route) => {
       const words = [
         { word: "one", start: 0.3, end: 0.6 }, // first tone [0,1) — kept
         { word: "stray", start: 1.5, end: 1.8 }, // first silence [1,2.5) — dropped
@@ -269,7 +276,7 @@ test.describe("Remove silence", () => {
         { word: "gone", start: 4.0, end: 4.3 }, // second silence [3.5,5) — dropped
         { word: "three", start: 5.3, end: 5.6 }, // third tone [5,6) — kept
       ];
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ words }) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "done", words }) });
     });
 
     await uploadFiles(page, [makeSegmentedWavFile("gaps.wav", SEGMENTS)]);
